@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>찾아가는 청년센터 - 관리자 페이지</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!-- 상단 헤더 -->
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">
+        <img
+          src="./assets/images/logo.png"
+          alt="찾아가는 청년센터 로고"
+          class="brand-logo"
+          onerror="this.style.display='none'"
+        />
+        <span class="brand-title">찾아가는 청년센터</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span id="testModeBadge" class="header-badge header-badge--test hidden">테스트 모드</span>
+        <span class="header-badge">관리자</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 메인 콘텐츠 -->
+  <main class="main-container main-container--admin">
+    <!-- 1. 관리자 비밀번호 확인 화면 -->
+    <section id="authSection" class="card auth-card">
+      <div class="card-header">
+        <h1 class="card-title">관리자 인증</h1>
+        <p class="card-subtitle">프로그램 생성 및 출석 링크 관리를 위해 비밀번호를 입력해주세요.</p>
+      </div>
+
+      <form id="authForm" class="form-stack" novalidate>
+        <div class="form-group">
+          <label for="adminPasswordInput" class="form-label">관리자 비밀번호</label>
+          <input
+            type="password"
+            id="adminPasswordInput"
+            class="form-input"
+            placeholder="비밀번호를 입력하세요"
+            autocomplete="current-password"
+            required
+          />
+          <p id="authError" class="field-error" role="alert"></p>
+        </div>
+        <button type="submit" class="btn btn--primary btn--full">확인</button>
+      </form>
+    </section>
+
+    <!-- 2. 관리자 대시보드 (인증 통과 후 표시) -->
+    <div id="adminDashboard" class="hidden">
+      <!-- 프로그램 생성 / 수정 카드 -->
+      <section id="programFormCard" class="card">
+        <!-- 수정 모드 배너 -->
+        <div id="editModeBanner" class="edit-mode-banner hidden" role="status">
+          <div class="edit-mode-text">
+            <strong>프로그램 수정 모드 (<span id="editModeCodeLabel"></span>)</strong>
+            저장 이후 새로 등록되는 출석에만 변경 내용이 반영되며, 이전 출석 기록은 그대로 유지됩니다.
+          </div>
+          <button type="button" id="cancelEditBtn" class="btn btn--secondary btn--sm">수정 취소</button>
+        </div>
+
+        <div class="card-header">
+          <h1 id="programFormTitle" class="card-title">새 프로그램 생성</h1>
+          <p id="programFormSubtitle" class="card-subtitle">
+            프로그램 정보를 입력하면 고유 코드가 자동 발급되고 참가자 출석 등록용 전용 링크가 생성됩니다.
+          </p>
+        </div>
+
+        <form id="createProgramForm" class="form-stack" novalidate>
+          <!-- 1) 프로그램명 -->
+          <div class="form-group">
+            <label for="inputProgramName" class="form-label">
+              프로그램명 <span class="required-mark" aria-hidden="true">*</span>
+            </label>
+            <input
+              type="text"
+              id="inputProgramName"
+              class="form-input"
+              placeholder="예: 청년 재테크 원데이 클래스"
+              required
+            />
+          </div>
+
+          <!-- 2) 프로그램 일자 (다회기 복수 선택 달력) -->
+          <div class="form-group">
+            <div class="form-label-row">
+              <span class="form-label">
+                프로그램 일자 <span class="required-mark" aria-hidden="true">*</span>
+                <span class="optional-mark">(다회기 복수 선택 가능)</span>
+              </span>
+              <span id="selectedDateCountPill" class="roster-count-pill">날짜 미선택</span>
+            </div>
+
+            <div class="calendar-box" id="multiDateCalendar">
+              <div class="calendar-toolbar">
+                <div class="calendar-nav">
+                  <button type="button" id="calPrevMonthBtn" class="calendar-nav-btn" aria-label="이전 달">&#8249;</button>
+                  <span id="calMonthLabel" class="calendar-month-label"></span>
+                  <button type="button" id="calNextMonthBtn" class="calendar-nav-btn" aria-label="다음 달">&#8250;</button>
+                </div>
+                <div class="calendar-actions">
+                  <button type="button" id="calTodayBtn" class="calendar-action-btn">오늘</button>
+                  <button type="button" id="calClearDatesBtn" class="calendar-action-btn" disabled>전체 해제</button>
+                </div>
+              </div>
+
+              <div id="calWeekdays" class="calendar-weekdays" role="row"></div>
+              <div id="calDaysGrid" class="calendar-days" role="grid"></div>
+
+              <div id="selectedDatesWrap" class="selected-dates-wrap">
+                <span class="selected-dates-empty">달력에서 프로그램 진행 날짜를 클릭해 선택하세요.</span>
+              </div>
+            </div>
+
+            <p class="form-help">
+              날짜를 클릭해 여러 일자를 선택할 수 있으며, 상단 요일(일~토)을 클릭하면 해당 월의 같은 요일을 한 번에 선택하거나 해제할 수 있습니다.
+            </p>
+          </div>
+
+          <!-- 3) 프로그램 시간 (오전/오후 · 시 · 분 드롭다운) -->
+          <div class="form-group">
+            <span class="form-label">
+              프로그램 시간 <span class="required-mark" aria-hidden="true">*</span>
+            </span>
+            <div class="time-range-box">
+              <div class="time-row">
+                <span class="time-row-label">시작</span>
+                <select id="startPeriod" class="form-select" aria-label="시작 오전/오후">
+                  <option value="오전">오전</option>
+                  <option value="오후" selected>오후</option>
+                </select>
+                <select id="startHour" class="form-select" aria-label="시작 시"></select>
+                <select id="startMinute" class="form-select" aria-label="시작 분"></select>
+              </div>
+              <div class="time-row">
+                <span class="time-row-label">종료</span>
+                <select id="endPeriod" class="form-select" aria-label="종료 오전/오후"></select>
+                <select id="endHour" class="form-select" aria-label="종료 시"></select>
+                <select id="endMinute" class="form-select" aria-label="종료 분"></select>
+              </div>
+              <div class="time-preview-row">
+                <span id="timePreviewText"></span>
+              </div>
+            </div>
+            <p class="form-help">
+              종료 시간은 선택한 시작 시간 이후의 시간만 자동으로 표시됩니다.
+            </p>
+          </div>
+
+          <!-- 4) 강사명 -->
+          <div class="form-group">
+            <label for="inputInstructor" class="form-label">
+              강사명 <span class="required-mark" aria-hidden="true">*</span>
+            </label>
+            <input
+              type="text"
+              id="inputInstructor"
+              class="form-input"
+              placeholder="예: 김청년"
+              required
+            />
+          </div>
+
+          <!-- 5) 사전 신청자 명단 (구조화 입력 + 추가 버튼) -->
+          <div class="form-group">
+            <div class="form-label-row">
+              <span class="form-label">
+                사전 신청자 명단 <span class="optional-mark">(선택사항)</span>
+              </span>
+              <span id="rosterCountPill" class="roster-count-pill">현장자유등록</span>
+            </div>
+
+            <div class="roster-builder">
+              <div class="roster-builder-grid">
+                <div class="roster-field">
+                  <label for="rosterNameInput" class="roster-field-label">참가자명</label>
+                  <input
+                    type="text"
+                    id="rosterNameInput"
+                    class="form-input"
+                    placeholder="실명 입력 (한글 2~5자)"
+                    maxlength="10"
+                  />
+                </div>
+
+                <div class="roster-field">
+                  <label for="rosterBirthInput" class="roster-field-label">생년월일 (6자리)</label>
+                  <input
+                    type="text"
+                    id="rosterBirthInput"
+                    class="form-input"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    maxlength="6"
+                    placeholder="예: 950213"
+                    autocomplete="off"
+                  />
+                </div>
+
+                <div class="roster-field roster-field--full">
+                  <span class="roster-field-label">성별</span>
+                  <div class="option-card-grid" role="radiogroup" aria-label="사전 신청자 성별">
+                    <div class="option-card">
+                      <input type="radio" id="rosterGenderMale" name="rosterGender" value="남성" />
+                      <label for="rosterGenderMale" class="option-card-label">남성</label>
+                    </div>
+                    <div class="option-card">
+                      <input type="radio" id="rosterGenderFemale" name="rosterGender" value="여성" />
+                      <label for="rosterGenderFemale" class="option-card-label">여성</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <p id="rosterAddError" class="field-error" role="alert"></p>
+
+              <div class="roster-add-row">
+                <span class="form-help">이름 · 생년월일 · 성별 입력 후 추가 버튼을 눌러 명단에 등록하세요.</span>
+                <button type="button" id="addRosterBtn" class="btn btn--secondary btn--sm">
+                  + 참가자 추가
+                </button>
+              </div>
+
+              <div id="rosterListContainer" class="roster-list"></div>
+            </div>
+
+            <p class="form-help">
+              명단을 등록하면 이름·생년월일·성별이 일치하는 참가자만 출석할 수 있으며, 비워두면 현장 자유 참여(누구나 등록 가능) 모드로 작동합니다.
+            </p>
+          </div>
+
+          <!-- 에러 알림 -->
+          <div id="createAlert" class="alert alert--danger hidden" role="alert"></div>
+
+          <!-- 생성 / 수정 버튼 -->
+          <div class="form-actions-row">
+            <button type="button" id="cancelEditBottomBtn" class="btn btn--secondary hidden">
+              수정 취소
+            </button>
+            <button type="submit" id="createProgramBtn" class="btn btn--primary btn--full">
+              프로그램 생성 및 링크 발급
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- 생성 / 수정 완료 결과 카드 -->
+      <section id="createdResultSection" class="card result-card hidden" aria-live="polite">
+        <div class="result-header">
+          <h2 class="result-title">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span id="resultTitleText">프로그램이 생성되었습니다</span>
+          </h2>
+          <span id="resultCodeBadge" class="badge badge--code"></span>
+        </div>
+
+        <div class="summary-box" style="margin-top: 0;">
+          <div class="summary-row">
+            <span class="summary-key">프로그램명</span>
+            <span id="resultProgramName" class="summary-val"></span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-key">일시</span>
+            <span id="resultDateTime" class="summary-val"></span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-key">강사명</span>
+            <span id="resultInstructor" class="summary-val"></span>
+          </div>
+          <div class="summary-row">
+            <span class="summary-key">참여 방식</span>
+            <span id="resultMode" class="summary-val"></span>
+          </div>
+        </div>
+
+        <div class="link-box">
+          <input
+            type="text"
+            id="resultUrlInput"
+            class="link-input"
+            readonly
+            aria-label="참가자 출석 등록 전용 URL"
+          />
+          <button type="button" id="copyResultUrlBtn" class="btn btn--primary btn--sm">
+            링크 복사
+          </button>
+        </div>
+
+        <div class="result-actions">
+          <a
+            id="openResultUrlLink"
+            href="#"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn--secondary btn--sm"
+          >
+            출석 페이지 열기
+          </a>
+        </div>
+      </section>
+
+      <!-- 기존 프로그램 목록 카드 -->
+      <section class="card">
+        <div class="section-header">
+          <div>
+            <h2 class="card-title" style="margin-bottom: 2px;">생성된 프로그램 목록</h2>
+            <p id="programListSubtitle" class="card-subtitle">저장된 프로그램의 출석 링크를 확인하고 복사할 수 있습니다.</p>
+          </div>
+          <button type="button" id="refreshListBtn" class="btn btn--secondary btn--sm">
+            새로고침
+          </button>
+        </div>
+
+        <div id="programListLoading" class="empty-state hidden">
+          프로그램 목록을 불러오는 중입니다...
+        </div>
+
+        <div id="programListError" class="alert alert--danger hidden" role="alert"></div>
+
+        <div id="programListContainer" class="program-list"></div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    &copy; 찾아가는 청년센터 프로그램 출석 등록 시스템
+  </footer>
+
+  <script src="./config.js"></script>
+  <script src="./admin.js"></script>
+</body>
+</html>
