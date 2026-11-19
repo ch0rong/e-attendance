@@ -124,19 +124,13 @@ e-attendance/
 
 ---
 
-## 6. Cloudflare Pages Free 배포 방법 (GitHub Private 저장소 유지)
+## 6. GitHub Pages 자동 배포 방법 (GitHub Free + GitHub Actions)
 
-GitHub 저장소를 **Private**으로 유지한 채 **Cloudflare Pages 무료 플랜**으로 자동 배포할 수 있습니다.
+`main` 브랜치에 푸시하면 `.github/workflows/deploy.yml`이 `node scripts/build-pages.js`를 실행해 `dist/` 산출물을 생성하고 **GitHub Pages**에 자동 배포합니다.
 
-1. [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages → Create → Pages → Connect to Git**에서 Private 저장소를 연결합니다.
-2. 빌드 설정을 아래와 같이 입력합니다.
-   - **Production branch**: `main`
-   - **Build command**: `node scripts/build-pages.js`
-   - **Build output directory**: `dist`
-3. **Environment variables (환경 변수)**에 아래 값을 추가합니다.
-   - 변수명: `GAS_WEB_APP_URL`
-   - 값: Google Apps Script 웹 앱 URL
-4. **Save and Deploy** 클릭 시 `dist/`에 프론트엔드 파일만 안전하게 빌드되어 배포됩니다. (`apps-script/`, `scripts/`, `README.md` 등은 공개 배포에서 제외)
-5. 배포 완료 후 발급된 `https://<프로젝트명>.pages.dev` 주소로 접속할 수 있습니다.
-   - 관리자 페이지: `https://<프로젝트명>.pages.dev/admin.html`
-   - 참가자 출석 페이지: `https://<프로젝트명>.pages.dev/index.html?code=gjyouth-XXXXXX`
+1. GitHub 저장소 **Settings → Secrets and variables → Actions**에 `GAS_WEB_APP_URL` 시크릿을 등록합니다.
+2. **Settings → Pages → Build and deployment → Source**를 **GitHub Actions**로 설정합니다.
+3. `main` 브랜치 푸시 시 `scripts/build-pages.js`가 프론트엔드 파일과 `dist/config.js`만 안전하게 빌드해 배포합니다. (`apps-script/`, `scripts/`, `README.md`는 배포 산출물에서 제외)
+4. 배포 완료 후 아래 주소로 접속할 수 있습니다.
+   - 관리자 페이지: `https://<아이디>.github.io/<저장소명>/admin.html`
+   - 참가자 출석 페이지: `https://<아이디>.github.io/<저장소명>/index.html?code=gjyouth-XXXXXX`
