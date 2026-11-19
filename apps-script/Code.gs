@@ -362,6 +362,11 @@ function handleGetProgram(code) {
     });
   }
 
+  const now = new Date();
+  const serverDateIso = Utilities.formatDate(now, TIMEZONE, 'yyyy-MM-dd');
+  const serverAttendanceDate = Utilities.formatDate(now, TIMEZONE, 'yyyy/MM/dd');
+  const isAttendanceDateValid = program.dates.indexOf(serverDateIso) !== -1;
+
   return createJsonResponse({
     status: 'success',
     data: {
@@ -373,6 +378,9 @@ function handleGetProgram(code) {
       instructor: program.instructor,
       isRestricted: program.preRegisteredList.length > 0,
       preRegisteredCount: program.preRegisteredList.length,
+      serverDateIso: serverDateIso,
+      serverAttendanceDate: serverAttendanceDate,
+      isAttendanceDateValid: isAttendanceDateValid,
     },
   });
 }
@@ -638,16 +646,16 @@ function calculateAgeGroup(birthDateStr) {
 
 /**
  * POST: 참가자 출석 등록
+ * - 브라우저가 전달한 날짜가 아닌 Google Apps Script 서버의 실제 한국 시간(Asia/Seoul) 기준으로 운영 일자 일치 여부 검증
  */
 function handleRegisterParticipant(payload) {
   const programCode = String(payload.programCode || '').trim();
-  const attendanceDate = String(payload.attendanceDate || '').trim();
   const participantName = String(payload.participantName || '').trim();
   const birthDate = normalizeBirthDate(payload.birthDate);
   const gender = String(payload.gender || '').trim();
   const privacyConsent = String(payload.privacyConsent || '').trim();
 
-  if (!programCode || !attendanceDate || !participantName || !birthDate || !gender) {
+  if (!programCode || !participantName || !birthDate || !gender) {
     return createJsonResponse({
       status: 'error',
       message: '필수 입력 항목이 누락되었습니다.',
@@ -661,7 +669,7 @@ function handleRegisterParticipant(payload) {
     });
   }
 
-  // 1. 프로그램 존재 여부 및 사전 신청자 명단(이름·생년월일·성별) 대조
+  // 1. 프로그램 존재 여부 확인
   const program = findProgramByCode(programCode);
   if (!program) {
     return createJsonResponse({
@@ -670,6 +678,21 @@ function handleRegisterParticipant(payload) {
     });
   }
 
+  // 2. 서버 실제 한국 시간(Asia/Seoul) 기준 프로그램 운영 일자 검증 (클라이언트 날짜 신뢰 안 함)
+  const now = new Date();
+  const serverTodayIso = Utilities.formatDate(now, TIMEZONE, 'yyyy-MM-dd');
+  const serverAttendanceDate = Utilities.formatDate(now, TIMEZONE, 'yyyy/MM/dd');
+  const regDate = serverTodayIso;
+  const regTime = Utilities.formatDate(now, TIMEZONE, 'HH:mm:ss');
+
+  if (program.dates.indexOf(serverTodayIso) === -1) {
+    return createJsonResponse({
+      status: 'invalid_date',
+      message: '현재 출석 등록 가능일이 아닙니다.',
+    });
+  }
+
+  // 3. 사전 신청자 명단(이름·생년월일·성별) 서버 측 대조
   if (program.preRegisteredList.length > 0) {
     var sameNameList = [];
     for (var r = 0; r < program.preRegisteredList.length; r++) {
@@ -705,7 +728,7 @@ function handleRegisterParticipant(payload) {
     }
   }
 
-  // 2. 중복 출석 검사 (프로그램코드 + 출석일자 + 참가자명 + 생년월일) 및 당일 첫 등록(1등) 여부 확인
+  // 4. 중복 출석 검사 (프로그램코드 + 서버 KST 출석일자 + 참가자명 + 생년월일) 및 당일 첫 등록(1등) 여부 확인
   const sheet = getOrCreateSheet(SHEET_PARTICIPANTS, PARTICIPANT_HEADERS);
   const lastRow = sheet.getLastRow();
   var sameDayCount = 0;
@@ -722,7 +745,7 @@ function handleRegisterParticipant(payload) {
       var existingName = String(row[5] || '').trim();
       var existingBirth = String(row[6] || '').trim();
 
-      if (existingCode === programCode && existingAttDate === attendanceDate) {
+      if (existingCode === programCode && existingAttDate === serverAttendanceDate) {
         sameDayCount++;
 
         if (existingName === participantName && existingBirth === birthDate) {
@@ -737,11 +760,6 @@ function handleRegisterParticipant(payload) {
 
   const isFirstToday = sameDayCount === 0;
   const todayOrder = sameDayCount + 1;
-
-  // 3. 한국 표준시(Asia/Seoul) 기준 등록날짜 / 등록시간 분리 및 연령구분 자동 계산
-  const now = new Date();
-  const regDate = Utilities.formatDate(now, TIMEZONE, 'yyyy-MM-dd');
-  const regTime = Utilities.formatDate(now, TIMEZONE, 'HH:mm:ss');
   const ageGroup = calculateAgeGroup(birthDate);
 
   const newRow = [
@@ -749,7 +767,7 @@ function handleRegisterParticipant(payload) {
     regTime,
     programCode,
     program.name,
-    attendanceDate,
+    serverAttendanceDate,
     participantName,
     birthDate,
     ageGroup,
@@ -770,7 +788,7 @@ function handleRegisterParticipant(payload) {
       regTime: regTime,
       programCode: programCode,
       programName: program.name,
-      attendanceDate: attendanceDate,
+      attendanceDate: serverAttendanceDate,
       participantName: participantName,
       birthDate: birthDate,
       ageGroup: ageGroup,

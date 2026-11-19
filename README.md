@@ -114,6 +114,7 @@ e-attendance/
 | 2026-11-19 | 15:42:10 | gjyouth-8A3K92 | 청년 재테크 특강 | 2026/11/19 | 이서연 | 2000-05-09 | 청년 | 여성 | 동의함 |
 
 - **등록날짜 / 등록시간**: 한국 표준시(`Asia/Seoul`) 기준으로 각각 `yyyy-MM-dd`, `HH:mm:ss`로 분리 기록
+- **프로그램 운영 일자 서버 검증(KST)**: 브라우저가 보낸 날짜를 신뢰하지 않고 Google Apps Script 서버의 실제 한국 시간(`Asia/Seoul`)이 설정된 `프로그램일자`와 일치할 때만 출석을 허용하며, 일치하지 않으면 `"현재 출석 등록 가능일이 아닙니다."`로 차단
 - **연령구분 자동 판별**:
   - 출생연도 **1987 ~ 2007** → `청년`
   - 출생연도 **1986 이하 또는 2008 이상** → `청년외`
@@ -123,11 +124,19 @@ e-attendance/
 
 ---
 
-## 6. GitHub Pages 자동 배포 방법 (GitHub Actions + Secrets)
+## 6. Cloudflare Pages Free 배포 방법 (GitHub Private 저장소 유지)
 
-1. GitHub 저장소 **Settings → Secrets and variables → Actions**에 `GAS_WEB_APP_URL` 시크릿을 추가합니다.
-2. **Settings → Pages → Build and deployment → Source**를 **GitHub Actions**로 선택합니다.
-3. `main` 브랜치에 푸시하면 `.github/workflows/deploy.yml`이 자동으로 정적 페이지를 빌드·배포합니다. (`apps-script/` 및 `.github/` 폴더는 배포 사이트에서 제외됩니다.)
-4. 배포 완료 후 아래 주소로 접속할 수 있습니다.
-   - 관리자 페이지: `https://<아이디>.github.io/<저장소명>/admin.html`
-   - 참가자 출석 페이지: `https://<아이디>.github.io/<저장소명>/index.html?code=gjyouth-XXXXXX`
+GitHub 저장소를 **Private**으로 유지한 채 **Cloudflare Pages 무료 플랜**으로 자동 배포할 수 있습니다.
+
+1. [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages → Create → Pages → Connect to Git**에서 Private 저장소를 연결합니다.
+2. 빌드 설정을 아래와 같이 입력합니다.
+   - **Production branch**: `main`
+   - **Build command**: `node scripts/build-pages.js`
+   - **Build output directory**: `dist`
+3. **Environment variables (환경 변수)**에 아래 값을 추가합니다.
+   - 변수명: `GAS_WEB_APP_URL`
+   - 값: Google Apps Script 웹 앱 URL
+4. **Save and Deploy** 클릭 시 `dist/`에 프론트엔드 파일만 안전하게 빌드되어 배포됩니다. (`apps-script/`, `scripts/`, `README.md` 등은 공개 배포에서 제외)
+5. 배포 완료 후 발급된 `https://<프로젝트명>.pages.dev` 주소로 접속할 수 있습니다.
+   - 관리자 페이지: `https://<프로젝트명>.pages.dev/admin.html`
+   - 참가자 출석 페이지: `https://<프로젝트명>.pages.dev/index.html?code=gjyouth-XXXXXX`

@@ -76,25 +76,45 @@ function formatDateWithWeekday(dateStr, short = false) {
 }
 
 /**
- * 시스템 현지 날짜를 YYYY/MM/DD 형식으로 반환
+ * 한국 표준시(KST, Asia/Seoul) 기준 현재 날짜를 YYYY-MM-DD 형식으로 반환
  */
-function getLocalAttendanceDate() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}/${month}/${day}`;
+function getKstIsoDate(dateObj = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Seoul',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(dateObj);
+    const map = {};
+    parts.forEach((p) => {
+      map[p.type] = p.value;
+    });
+    if (map.year && map.month && map.day) {
+      return `${map.year}-${map.month}-${map.day}`;
+    }
+  } catch (err) {
+    // 폴백: UTC+9 계산
+  }
+  const kst = new Date(dateObj.getTime() + 9 * 60 * 60 * 1000);
+  const y = kst.getUTCFullYear();
+  const m = String(kst.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(kst.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 /**
- * 시스템 현지 날짜를 YYYY-MM-DD 형식으로 반환 (다회기 오늘 일정 강조용)
+ * 한국 표준시(KST, Asia/Seoul) 기준 현재 날짜를 YYYY/MM/DD 형식으로 반환
+ */
+function getLocalAttendanceDate() {
+  return getKstIsoDate().replace(/-/g, '/');
+}
+
+/**
+ * 한국 표준시(KST, Asia/Seoul) 기준 현재 날짜를 YYYY-MM-DD 형식으로 반환
  */
 function getLocalIsoDate() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return getKstIsoDate();
 }
 
 /**
@@ -371,13 +391,35 @@ async function fetchProgramByCode(code) {
 
 async function submitAttendanceRecord(payload) {
   if (IS_TEST_MODE) {
+    const programs = getLocalPrograms();
+    const program = programs.find((item) => item.code === payload.programCode);
+    if (!program) {
+      return {
+        status: 'not_found',
+        message: '유효하지 않은 프로그램입니다.',
+      };
+    }
+
+    // 한국 시간(KST) 기준 실제 현재 날짜와 프로그램 운영 일자 일치 여부 검증
+    const kstTodayIso = getKstIsoDate();
+    const kstAttendanceDate = kstTodayIso.replace(/-/g, '/');
+    const scheduledDates = parseProgramDates(
+      Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
+    );
+    if (!scheduledDates.includes(kstTodayIso)) {
+      return {
+        status: 'invalid_date',
+        message: '현재 출석 등록 가능일이 아닙니다.',
+      };
+    }
+
     const participants = getLocalParticipants();
 
-    // 중복 출석 체크: 프로그램코드 + 출석일자 + 참가자명 + 생년월일
+    // 중복 출석 체크: 프로그램코드 + KST 출석일자 + 참가자명 + 생년월일
     const isDuplicate = participants.some(
       (row) =>
         row.programCode === payload.programCode &&
-        row.attendanceDate === payload.attendanceDate &&
+        row.attendanceDate === kstAttendanceDate &&
         row.participantName === payload.participantName &&
         row.birthDate === payload.birthDate
     );
@@ -389,26 +431,26 @@ async function submitAttendanceRecord(payload) {
       };
     }
 
-    // 오늘의 1등 판별: 동일 프로그램코드 + 출석일자 기준 기존 등록 건수 확인
+    // 오늘의 1등 판별: 동일 프로그램코드 + KST 출석일자 기준 기존 등록 건수 확인
     const sameDayCount = participants.filter(
       (row) =>
         row.programCode === payload.programCode &&
-        row.attendanceDate === payload.attendanceDate
+        row.attendanceDate === kstAttendanceDate
     ).length;
     const isFirstToday = sameDayCount === 0;
     const todayOrder = sameDayCount + 1;
 
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
-    const regDate = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const regDate = kstTodayIso;
     const regTime = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 
     const record = {
       regDate,
       regTime,
       programCode: payload.programCode,
-      programName: payload.programName,
-      attendanceDate: payload.attendanceDate,
+      programName: program.name,
+      attendanceDate: kstAttendanceDate,
       participantName: payload.participantName,
       birthDate: payload.birthDate,
       ageGroup: calculateAgeGroup(payload.birthDate),
@@ -589,7 +631,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const dates = parseProgramDates(
       Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
     );
-    const todayIso = getLocalIsoDate();
+    const todayIso = program.serverDateIso || getLocalIsoDate();
 
     programNameInput.value = program.name;
     programInstructor.textContent = `강사: ${program.instructor}`;
@@ -623,8 +665,19 @@ document.addEventListener('DOMContentLoaded', () => {
       restrictedBadge.classList.add('hidden');
     }
 
-    // 접속 시점의 시스템 현지 날짜 (YYYY/MM/DD)
-    attendanceDateInput.value = getLocalAttendanceDate();
+    // 서버 한국 시간(KST) 기준 출석일자 표시 (로컬 테스트 모드 시 KST 폴백)
+    attendanceDateInput.value = program.serverAttendanceDate || getLocalAttendanceDate();
+
+    // 프로그램 운영 일자가 아닌 경우 미리 안내 표시 (제출 시에도 서버에서 최종 차단)
+    const isDateValid =
+      typeof program.isAttendanceDateValid === 'boolean'
+        ? program.isAttendanceDateValid
+        : dates.includes(todayIso);
+    if (!isDateValid) {
+      showFormAlert('현재 출석 등록 가능일이 아닙니다.');
+    } else {
+      hideFormAlert();
+    }
 
     loadingSection.classList.add('hidden');
     invalidSection.classList.add('hidden');
@@ -758,13 +811,10 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // 전송 데이터 구성
-    const attendanceDate = attendanceDateInput.value;
-
+    // 전송 데이터 구성 (실제 출석일자는 서버의 한국 시간 KST 기준으로 검증 및 저장)
     const payload = {
       programCode: currentProgram.code,
       programName: currentProgram.name,
-      attendanceDate,
       participantName: nameCheck.cleanedName,
       birthDate,
       gender: genderVal,
@@ -779,11 +829,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (result.status === 'success') {
         showCompleteScreen({
-          programName: currentProgram.name,
-          attendanceDate,
+          programName: (result.data && result.data.programName) || currentProgram.name,
+          attendanceDate:
+            (result.data && result.data.attendanceDate) || attendanceDateInput.value,
           participantName: nameCheck.cleanedName,
           isFirstToday: Boolean(result.data && result.data.isFirstToday),
         });
+        return;
+      }
+
+      if (result.status === 'invalid_date') {
+        showFormAlert(result.message || '현재 출석 등록 가능일이 아닙니다.');
         return;
       }
 
