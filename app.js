@@ -761,6 +761,124 @@ function normalizeRosterList(raw) {
     .filter(Boolean);
 }
 
+/**
+ * 두벌식 영문 타자 -> 한글 실시간 자동 조합 변환기
+ * - 영문 키보드 상태에서 참가자명을 입력해도 즉시 한글로 자동 조합
+ */
+const ENG_TO_JAMO = {
+  r: 'ㄱ', R: 'ㄲ', s: 'ㄴ', e: 'ㄷ', E: 'ㄸ', f: 'ㄹ', a: 'ㅁ',
+  q: 'ㅂ', Q: 'ㅃ', t: 'ㅅ', T: 'ㅆ', d: 'ㅇ', w: 'ㅈ', W: 'ㅉ',
+  c: 'ㅊ', z: 'ㅋ', x: 'ㅌ', v: 'ㅍ', g: 'ㅎ',
+  k: 'ㅏ', o: 'ㅐ', i: 'ㅑ', O: 'ㅒ', j: 'ㅓ', p: 'ㅔ', u: 'ㅕ',
+  P: 'ㅖ', h: 'ㅗ', y: 'ㅛ', n: 'ㅜ', b: 'ㅠ', m: 'ㅡ', l: 'ㅣ',
+};
+const CHOSEONG_LIST = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const JUNGSEONG_LIST = ['ㅏ','ㅐ','ㅑ','ㅒ','ㅓ','ㅔ','ㅕ','ㅖ','ㅗ','ㅘ','ㅙ','ㅚ','ㅛ','ㅜ','ㅝ','ㅞ','ㅟ','ㅠ','ㅡ','ㅢ','ㅣ'];
+const JONGSEONG_LIST = ['','ㄱ','ㄲ','ㄳ','ㄴ','ㄵ','ㄶ','ㄷ','ㄹ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅁ','ㅂ','ㅄ','ㅅ','ㅆ','ㅇ','ㅈ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const COMPLEX_VOWEL_MAP = { 'ㅗㅏ':'ㅘ','ㅗㅐ':'ㅙ','ㅗㅣ':'ㅚ','ㅜㅓ':'ㅝ','ㅜㅔ':'ㅞ','ㅜㅣ':'ㅟ','ㅡㅣ':'ㅢ' };
+const SPLIT_VOWEL_MAP = { 'ㅘ':['ㅗ','ㅏ'],'ㅙ':['ㅗ','ㅐ'],'ㅚ':['ㅗ','ㅣ'],'ㅝ':['ㅜ','ㅓ'],'ㅞ':['ㅜ','ㅔ'],'ㅟ':['ㅜ','ㅣ'],'ㅢ':['ㅡ','ㅣ'] };
+const COMPLEX_JONG_MAP = { 'ㄱㅅ':'ㄳ','ㄴㅈ':'ㄵ','ㄴㅎ':'ㄶ','ㄹㄱ':'ㄺ','ㄹㅁ':'ㄻ','ㄹㅂ':'ㄼ','ㄹㅅ':'ㄽ','ㄹㅌ':'ㄾ','ㄹㅍ':'ㄿ','ㄹㅎ':'ㅀ','ㅂㅅ':'ㅄ' };
+const SPLIT_JONG_MAP = { 'ㄳ':['ㄱ','ㅅ'],'ㄵ':['ㄴ','ㅈ'],'ㄶ':['ㄴ','ㅎ'],'ㄺ':['ㄹ','ㄱ'],'ㄻ':['ㄹ','ㅁ'],'ㄼ':['ㄹ','ㅂ'],'ㄽ':['ㄹ','ㅅ'],'ㄾ':['ㄹ','ㅌ'],'ㄿ':['ㄹ','ㅍ'],'ㅀ':['ㄹ','ㅎ'],'ㅄ':['ㅂ','ㅅ'] };
+const CHOSEONG_SET = new Set(CHOSEONG_LIST);
+const JUNGSEONG_SET = new Set(JUNGSEONG_LIST);
+
+function isVowelJamo(ch) {
+  return JUNGSEONG_SET.has(ch);
+}
+
+function isConsonantJamo(ch) {
+  return CHOSEONG_SET.has(ch);
+}
+
+function decomposeToJamoStream(text) {
+  const stream = [];
+  for (const ch of String(text || '')) {
+    const code = ch.charCodeAt(0);
+    if (code >= 0xac00 && code <= 0xd7a3) {
+      const offset = code - 0xac00;
+      const cho = Math.floor(offset / 588);
+      const jung = Math.floor((offset % 588) / 28);
+      const jong = offset % 28;
+      stream.push(CHOSEONG_LIST[cho]);
+      const v = JUNGSEONG_LIST[jung];
+      if (SPLIT_VOWEL_MAP[v]) stream.push(...SPLIT_VOWEL_MAP[v]);
+      else stream.push(v);
+      if (jong > 0) {
+        const j = JONGSEONG_LIST[jong];
+        if (SPLIT_JONG_MAP[j]) stream.push(...SPLIT_JONG_MAP[j]);
+        else stream.push(j);
+      }
+    } else if (ENG_TO_JAMO[ch]) {
+      stream.push(ENG_TO_JAMO[ch]);
+    } else if (ENG_TO_JAMO[ch.toLowerCase()]) {
+      stream.push(ENG_TO_JAMO[ch.toLowerCase()]);
+    } else if (SPLIT_VOWEL_MAP[ch]) {
+      stream.push(...SPLIT_VOWEL_MAP[ch]);
+    } else if (SPLIT_JONG_MAP[ch]) {
+      stream.push(...SPLIT_JONG_MAP[ch]);
+    } else {
+      stream.push(ch);
+    }
+  }
+  return stream;
+}
+
+function convertEngTypingToHangul(text) {
+  const stream = decomposeToJamoStream(text);
+  let out = '';
+  let i = 0;
+
+  while (i < stream.length) {
+    const c = stream[i];
+    if (isConsonantJamo(c) && i + 1 < stream.length && isVowelJamo(stream[i + 1])) {
+      const choIdx = CHOSEONG_LIST.indexOf(c);
+      i += 1;
+
+      let vowel = stream[i];
+      i += 1;
+      if (i < stream.length && COMPLEX_VOWEL_MAP[vowel + stream[i]]) {
+        vowel = COMPLEX_VOWEL_MAP[vowel + stream[i]];
+        i += 1;
+      }
+      const jungIdx = JUNGSEONG_LIST.indexOf(vowel);
+
+      let jongIdx = 0;
+      if (i < stream.length && isConsonantJamo(stream[i])) {
+        const cand1 = stream[i];
+        const next1IsVowel = i + 1 < stream.length && isVowelJamo(stream[i + 1]);
+        const j1Idx = JONGSEONG_LIST.indexOf(cand1);
+
+        if (!next1IsVowel && j1Idx > 0) {
+          if (i + 1 < stream.length && isConsonantJamo(stream[i + 1])) {
+            const combined = COMPLEX_JONG_MAP[cand1 + stream[i + 1]];
+            const next2IsVowel = i + 2 < stream.length && isVowelJamo(stream[i + 2]);
+            if (combined && !next2IsVowel) {
+              jongIdx = JONGSEONG_LIST.indexOf(combined);
+              i += 2;
+            } else {
+              jongIdx = j1Idx;
+              i += 1;
+            }
+          } else {
+            jongIdx = j1Idx;
+            i += 1;
+          }
+        }
+      }
+
+      out += String.fromCharCode(0xac00 + choIdx * 588 + jungIdx * 28 + jongIdx);
+    } else if (isVowelJamo(c) && i + 1 < stream.length && COMPLEX_VOWEL_MAP[c + stream[i + 1]]) {
+      out += COMPLEX_VOWEL_MAP[c + stream[i + 1]];
+      i += 2;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+
+  return out;
+}
+
 function validateParticipantName(rawValue) {
   const cleaned = String(rawValue || '').replace(/\s+/g, '');
 
@@ -1264,7 +1382,25 @@ document.addEventListener('DOMContentLoaded', () => {
     formAlert.classList.add('hidden');
   }
 
-  participantNameInput.addEventListener('input', () => {
+  let isComposingParticipantName = false;
+  participantNameInput.addEventListener('compositionstart', () => {
+    isComposingParticipantName = true;
+  });
+  participantNameInput.addEventListener('compositionend', () => {
+    isComposingParticipantName = false;
+  });
+
+  participantNameInput.addEventListener('input', (e) => {
+    if (
+      !isComposingParticipantName &&
+      !(e && e.isComposing) &&
+      /[a-zA-Z]/.test(participantNameInput.value)
+    ) {
+      const converted = convertEngTypingToHangul(participantNameInput.value);
+      if (converted !== participantNameInput.value) {
+        participantNameInput.value = converted;
+      }
+    }
     clearFieldError(nameError, [participantNameInput]);
     hideFormAlert();
   });
