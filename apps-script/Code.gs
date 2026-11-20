@@ -240,6 +240,29 @@ function toSheetFlag(val) {
 }
 
 /**
+ * 프로그램 일자 파싱 (단일/복수 날짜 지원: 중복 제거 + 오름차순 정렬)
+ */
+function parseProgramDates(raw) {
+  var items = [];
+  if (Array.isArray(raw)) {
+    items = raw.map(function (item) { return String(item || '').trim(); });
+  } else if (typeof raw === 'string' && raw.trim() !== '') {
+    items = raw.split(/[,\r\n]+/).map(function (item) { return item.trim(); });
+  }
+  var seen = {};
+  var result = [];
+  for (var i = 0; i < items.length; i++) {
+    var d = items[i];
+    if (d && !seen[d]) {
+      seen[d] = true;
+      result.push(d);
+    }
+  }
+  result.sort();
+  return result;
+}
+
+/**
  * 성별 문자열 정규화 ('남성' -> '남', '여성' -> '여')
  */
 function normalizeGender(raw) {
@@ -973,11 +996,12 @@ function handleRegisterParticipant(payload) {
     String(payload.attendanceDate || '').trim() ||
     Utilities.formatDate(now, TIMEZONE, 'yyyy/MM/dd');
 
-  // 4. 프로그램 일자 유효성 검증 (다회차 프로그램이 아닌 경우 설정된 일자와 당일 일치 필요)
-  if (!program.isMultiSession && program.date && program.date !== regDate) {
+  // 4. 프로그램 일자 유효성 검증 (다회차 날짜 제한 해제가 아닌 경우 선택된 프로그램 일자 중 당일 포함 필요)
+  const scheduledDates = parseProgramDates(program.date);
+  if (!program.isMultiSession && scheduledDates.length > 0 && scheduledDates.indexOf(regDate) === -1) {
     return createJsonResponse({
       status: 'invalid_date',
-      message: '출석 가능한 일자가 아닙니다. (프로그램 일자: ' + program.date + ')',
+      message: '출석 가능한 일자가 아닙니다. (프로그램 일자: ' + scheduledDates.join(', ') + ')',
     });
   }
 

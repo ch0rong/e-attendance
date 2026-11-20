@@ -424,6 +424,18 @@ function parseBoolFlag(val) {
   return s === 'Y' || s === 'TRUE' || s === '1' || s === 'YES';
 }
 
+function parseProgramDates(raw) {
+  let items = [];
+  if (Array.isArray(raw)) {
+    items = raw.map((v) => String(v || '').trim());
+  } else if (typeof raw === 'string' && raw.trim() !== '') {
+    items = raw.split(/[,\r\n]+/).map((v) => v.trim());
+  }
+  const unique = Array.from(new Set(items.filter((v) => v.length > 0)));
+  unique.sort();
+  return unique;
+}
+
 /**
  * 접속 시점의 시스템 현지 날짜를 YYYY-MM-DD 형식으로 반환
  */
@@ -957,12 +969,15 @@ async function submitAttendanceRecord(payload) {
       }
     }
 
-    // 1) 프로그램 일자 검증 (다회차 프로그램이 아닌 경우 당일만 허용)
+    // 1) 프로그램 일자 검증 (다회차 날짜 제한 해제가 아닌 경우 선택된 프로그램 일자 중 오늘이 포함되어야 함)
     const todayIso = getSystemLocalIsoDate();
-    if (!program.isMultiSession && program.date && program.date !== todayIso) {
+    const scheduledDates = parseProgramDates(
+      Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
+    );
+    if (!program.isMultiSession && scheduledDates.length > 0 && !scheduledDates.includes(todayIso)) {
       return {
         status: 'invalid_date',
-        message: `출석 가능한 일자가 아닙니다. (프로그램 일자: ${program.date})`,
+        message: `출석 가능한 일자가 아닙니다. (프로그램 일자: ${scheduledDates.join(', ')})`,
       };
     }
 
@@ -1577,10 +1592,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
       currentProgram = program;
 
-      // 프로그램 일자 유효성 검증 (다회차 프로그램이 아닌 경우 설정된 일자와 오늘 날짜가 일치해야 함)
-      if (!program.isMultiSession && program.date && program.date !== todayIso) {
+      // 프로그램 일자 유효성 검증 (다회차 날짜 제한 해제가 아닌 경우 선택된 일자 중 오늘이 포함되어야 함)
+      const scheduledDates = parseProgramDates(
+        Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
+      );
+      if (!program.isMultiSession && scheduledDates.length > 0 && !scheduledDates.includes(todayIso)) {
         showInvalidScreen(
-          `출석 가능한 일자가 아닙니다. (프로그램 일자: ${program.date})`,
+          `출석 가능한 일자가 아닙니다. (프로그램 일자: ${scheduledDates.join(', ')})`,
           '출석 가능한 일자가 아닙니다'
         );
         return;

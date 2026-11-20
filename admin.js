@@ -25,6 +25,7 @@ const STORAGE_KEY_PROGRAMS = 'gjyouth_programs';
 const CODE_PREFIX = 'gjyouth-';
 const CODE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const CODE_LENGTH = 6;
+const WEEKDAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
 
 const ERROR_MSG_INVALID_BIRTH6 = '올바른 생년월일 6자리(예: 960211)를 입력해주세요.';
 
@@ -53,6 +54,41 @@ function parseBoolFlag(val) {
   if (typeof val === 'boolean') return val;
   const s = String(val || '').trim().toUpperCase();
   return s === 'Y' || s === 'TRUE' || s === '1' || s === 'YES';
+}
+
+function parseProgramDates(raw) {
+  let items = [];
+  if (Array.isArray(raw)) {
+    items = raw.map((v) => String(v || '').trim());
+  } else if (typeof raw === 'string' && raw.trim() !== '') {
+    items = raw.split(/[,\r\n]+/).map((v) => v.trim());
+  }
+  const unique = Array.from(new Set(items.filter((v) => v.length > 0)));
+  unique.sort();
+  return unique;
+}
+
+function toIsoDate(year, monthZeroBased, day) {
+  const m = String(monthZeroBased + 1).padStart(2, '0');
+  const d = String(day).padStart(2, '0');
+  return `${year}-${m}-${d}`;
+}
+
+function formatDateWithWeekday(dateStr, short = false) {
+  const match = String(dateStr || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return String(dateStr || '');
+  const weekday = WEEKDAY_LABELS[new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getDay()];
+  if (short) return `${match[2]}/${match[3]} (${weekday})`;
+  return `${dateStr} (${weekday})`;
+}
+
+function formatProgramDatesSummary(program) {
+  const dates = parseProgramDates(
+    Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
+  );
+  if (dates.length === 0) return String(program.date || '');
+  if (dates.length === 1) return formatDateWithWeekday(dates[0]);
+  return `총 ${dates.length}회기 (${dates.map((d) => formatDateWithWeekday(d, true)).join(', ')})`;
 }
 
 function normalizeGender(raw) {
@@ -167,9 +203,12 @@ function normalizeRosterList(raw) {
 
 function normalizeProgramObject(p) {
   const roster = normalizeRosterList(p.roster || p.preRegisteredList);
+  const dates = parseProgramDates(Array.isArray(p.dates) && p.dates.length > 0 ? p.dates : p.date);
   const locationEnabled = parseBoolFlag(p.locationEnabled);
   return {
     ...p,
+    date: dates.join(', '),
+    dates,
     roster,
     preRegisteredList: roster,
     isMultiSession: parseBoolFlag(p.isMultiSession),
@@ -606,12 +645,22 @@ document.addEventListener('DOMContentLoaded', () => {
   // 기본 입력 요소
   const createProgramForm = document.getElementById('createProgramForm');
   const inputProgramName = document.getElementById('inputProgramName');
-  const inputProgramDate = document.getElementById('inputProgramDate');
   const inputIsMultiSession = document.getElementById('inputIsMultiSession');
   const inputProgramTime = document.getElementById('inputProgramTime');
   const inputInstructor = document.getElementById('inputInstructor');
   const createAlert = document.getElementById('createAlert');
   const createProgramBtn = document.getElementById('createProgramBtn');
+
+  // 다중 날짜 체크 달력 요소
+  const selectedDateCountPill = document.getElementById('selectedDateCountPill');
+  const calPrevMonthBtn = document.getElementById('calPrevMonthBtn');
+  const calNextMonthBtn = document.getElementById('calNextMonthBtn');
+  const calMonthLabel = document.getElementById('calMonthLabel');
+  const calTodayBtn = document.getElementById('calTodayBtn');
+  const calClearDatesBtn = document.getElementById('calClearDatesBtn');
+  const calWeekdays = document.getElementById('calWeekdays');
+  const calDaysGrid = document.getElementById('calDaysGrid');
+  const selectedDatesWrap = document.getElementById('selectedDatesWrap');
 
   // 위치 기반 제한 설정 요소
   const inputLocationEnabled = document.getElementById('inputLocationEnabled');
@@ -652,9 +701,168 @@ document.addEventListener('DOMContentLoaded', () => {
   const programListError = document.getElementById('programListError');
   const programListContainer = document.getElementById('programListContainer');
 
-  // 기본 일자: 오늘 날짜 & 기본 담당자 확인 코드 자동 생성
-  inputProgramDate.value = getTodayIsoLocal();
+  // 기본 담당자 확인 코드 자동 생성 & 다중 날짜 달력 초기화
   inputManagerCode.value = generateManagerCode();
+
+  const todayNow = new Date();
+  let calViewYear = todayNow.getFullYear();
+  let calViewMonth = todayNow.getMonth();
+  let selectedDates = new Set([getTodayIsoLocal()]);
+
+  function getSortedSelectedDates() {
+    return Array.from(selectedDates).sort();
+  }
+
+  function renderSelectedDateChips() {
+    const sorted = getSortedSelectedDates();
+    selectedDatesWrap.innerHTML = '';
+
+    if (sorted.length === 0) {
+      selectedDateCountPill.textContent = '날짜 미선택';
+      selectedDateCountPill.classList.remove('has-names');
+      calClearDatesBtn.disabled = true;
+
+      const empty = document.createElement('span');
+      empty.className = 'selected-dates-empty';
+      empty.textContent = '달력에서 프로그램 진행 날짜를 클릭해 선택하세요.';
+      selectedDatesWrap.appendChild(empty);
+      return;
+    }
+
+    selectedDateCountPill.textContent = `${sorted.length}일 선택`;
+    selectedDateCountPill.classList.add('has-names');
+    calClearDatesBtn.disabled = false;
+
+    sorted.forEach((dateStr) => {
+      const chip = document.createElement('span');
+      chip.className = 'date-chip';
+
+      const text = document.createElement('span');
+      text.textContent = formatDateWithWeekday(dateStr, sorted.length > 3);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'date-chip-remove';
+      removeBtn.setAttribute('aria-label', `${dateStr} 선택 해제`);
+      removeBtn.textContent = '×';
+      removeBtn.addEventListener('click', () => {
+        selectedDates.delete(dateStr);
+        renderCalendar();
+        hideCreateAlert();
+      });
+
+      chip.appendChild(text);
+      chip.appendChild(removeBtn);
+      selectedDatesWrap.appendChild(chip);
+    });
+  }
+
+  function toggleWeekdayInCurrentMonth(weekdayIndex) {
+    const daysInMonth = new Date(calViewYear, calViewMonth + 1, 0).getDate();
+    const matchingDates = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      if (new Date(calViewYear, calViewMonth, day).getDay() === weekdayIndex) {
+        matchingDates.push(toIsoDate(calViewYear, calViewMonth, day));
+      }
+    }
+    const allSelected = matchingDates.every((d) => selectedDates.has(d));
+    matchingDates.forEach((d) => {
+      if (allSelected) selectedDates.delete(d);
+      else selectedDates.add(d);
+    });
+    renderCalendar();
+    hideCreateAlert();
+  }
+
+  function renderCalendar() {
+    calMonthLabel.textContent = `${calViewYear}년 ${calViewMonth + 1}월`;
+
+    if (calWeekdays.children.length === 0) {
+      WEEKDAY_LABELS.forEach((label, idx) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'calendar-weekday-btn';
+        if (idx === 0) btn.classList.add('is-sun');
+        if (idx === 6) btn.classList.add('is-sat');
+        btn.textContent = label;
+        btn.title = `${label}요일 전체 선택/해제`;
+        btn.addEventListener('click', () => toggleWeekdayInCurrentMonth(idx));
+        calWeekdays.appendChild(btn);
+      });
+    }
+
+    calDaysGrid.innerHTML = '';
+    const firstWeekday = new Date(calViewYear, calViewMonth, 1).getDay();
+    const daysInMonth = new Date(calViewYear, calViewMonth + 1, 0).getDate();
+    const todayIso = getTodayIsoLocal();
+
+    for (let i = 0; i < firstWeekday; i++) {
+      const emptyCell = document.createElement('div');
+      emptyCell.className = 'calendar-day-empty';
+      calDaysGrid.appendChild(emptyCell);
+    }
+
+    for (let day = 1; day <= daysInMonth; day++) {
+      const iso = toIsoDate(calViewYear, calViewMonth, day);
+      const weekday = new Date(calViewYear, calViewMonth, day).getDay();
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'calendar-day-btn';
+      btn.dataset.date = iso;
+      btn.textContent = String(day);
+
+      if (weekday === 0) btn.classList.add('is-sun');
+      if (weekday === 6) btn.classList.add('is-sat');
+      if (iso === todayIso) btn.classList.add('is-today');
+      if (selectedDates.has(iso)) btn.classList.add('is-selected');
+
+      btn.addEventListener('click', () => {
+        if (selectedDates.has(iso)) selectedDates.delete(iso);
+        else selectedDates.add(iso);
+        renderCalendar();
+        hideCreateAlert();
+      });
+
+      calDaysGrid.appendChild(btn);
+    }
+
+    renderSelectedDateChips();
+  }
+
+  calPrevMonthBtn.addEventListener('click', () => {
+    calViewMonth -= 1;
+    if (calViewMonth < 0) {
+      calViewMonth = 11;
+      calViewYear -= 1;
+    }
+    renderCalendar();
+  });
+
+  calNextMonthBtn.addEventListener('click', () => {
+    calViewMonth += 1;
+    if (calViewMonth > 11) {
+      calViewMonth = 0;
+      calViewYear += 1;
+    }
+    renderCalendar();
+  });
+
+  calTodayBtn.addEventListener('click', () => {
+    const now = new Date();
+    calViewYear = now.getFullYear();
+    calViewMonth = now.getMonth();
+    selectedDates.add(getTodayIsoLocal());
+    renderCalendar();
+    hideCreateAlert();
+  });
+
+  calClearDatesBtn.addEventListener('click', () => {
+    selectedDates.clear();
+    renderCalendar();
+    hideCreateAlert();
+  });
+
+  renderCalendar();
 
   // --------------------------------------------------------------------------
   // 1. 알림 및 위치 설정 UI 헬퍼
@@ -1005,7 +1213,11 @@ document.addEventListener('DOMContentLoaded', () => {
     createProgramBtn.textContent = '프로그램 생성 및 저장';
 
     createProgramForm.reset();
-    inputProgramDate.value = getTodayIsoLocal();
+    const now = new Date();
+    calViewYear = now.getFullYear();
+    calViewMonth = now.getMonth();
+    selectedDates = new Set([getTodayIsoLocal()]);
+    renderCalendar();
     inputIsMultiSession.checked = false;
     inputLocationEnabled.checked = false;
     inputAllowedRadius.value = '300';
@@ -1026,7 +1238,18 @@ document.addEventListener('DOMContentLoaded', () => {
     createProgramBtn.textContent = '변경사항 저장';
 
     inputProgramName.value = program.name || '';
-    inputProgramDate.value = program.date || getTodayIsoLocal();
+    const existingDates = parseProgramDates(
+      Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
+    );
+    selectedDates = new Set(existingDates);
+    if (existingDates.length > 0) {
+      const m = existingDates[0].match(/^(\d{4})-(\d{2})-\d{2}$/);
+      if (m) {
+        calViewYear = Number(m[1]);
+        calViewMonth = Number(m[2]) - 1;
+      }
+    }
+    renderCalendar();
     inputIsMultiSession.checked = Boolean(program.isMultiSession);
     inputProgramTime.value = program.time || '';
     inputInstructor.value = program.instructor || '';
@@ -1115,8 +1338,8 @@ document.addEventListener('DOMContentLoaded', () => {
     resultCodeBadge.textContent = program.code;
     resultProgramName.textContent = program.name;
     resultDateTime.textContent =
-      `${program.date} · ${program.time}` +
-      (program.isMultiSession ? ' (다회차 · 날짜 제한 해제)' : '');
+      `${formatProgramDatesSummary(program)} · ${program.time}` +
+      (program.isMultiSession ? ' (날짜 제한 해제)' : '');
     resultInstructor.textContent = program.instructor;
     resultRosterCount.textContent =
       roster.length > 0
@@ -1158,7 +1381,8 @@ document.addEventListener('DOMContentLoaded', () => {
     hideCreateAlert();
 
     const name = inputProgramName.value.trim();
-    const date = inputProgramDate.value.trim();
+    const dates = getSortedSelectedDates();
+    const date = dates.join(', ');
     const isMultiSession = Boolean(inputIsMultiSession.checked);
     const time = inputProgramTime.value.trim();
     const instructor = inputInstructor.value.trim();
@@ -1168,9 +1392,8 @@ document.addEventListener('DOMContentLoaded', () => {
       inputProgramName.focus();
       return;
     }
-    if (!date) {
-      showCreateAlert('프로그램 일자를 선택해주세요.');
-      inputProgramDate.focus();
+    if (dates.length === 0) {
+      showCreateAlert('달력에서 프로그램 일자를 1개 이상 선택해주세요.');
       return;
     }
     if (!time) {
@@ -1335,7 +1558,7 @@ document.addEventListener('DOMContentLoaded', () => {
       meta.className = 'program-item-meta';
 
       const dateSpan = document.createElement('span');
-      dateSpan.textContent = `일시: ${program.date} ${program.time}`;
+      dateSpan.textContent = `일시: ${formatProgramDatesSummary(program)} ${program.time}`;
       meta.appendChild(dateSpan);
 
       const instructorSpan = document.createElement('span');

@@ -94,24 +94,47 @@
             />
           </div>
 
-          <!-- 2) 프로그램 일자 (+ 다회차 체크박스) & 3) 프로그램 시간 -->
-          <div class="form-grid-2">
-            <div class="form-group">
-              <label for="inputProgramDate" class="form-label">
+          <!-- 2) 프로그램 일자 (다중 날짜 체크 달력 + 다회차 날짜 제한 해제 옵션) -->
+          <div class="form-group">
+            <div class="form-label-row">
+              <span class="form-label">
                 프로그램 일자 <span class="required-mark" aria-hidden="true">*</span>
-              </label>
-              <input
-                type="date"
-                id="inputProgramDate"
-                class="form-input form-input--date"
-                required
-              />
-              <label class="checkbox-inline">
-                <input type="checkbox" id="inputIsMultiSession" />
-                <span>다회차 프로그램 (날짜 제한 해제)</span>
-              </label>
+                <span class="optional-mark">(여러 날짜 클릭해 복수 선택 가능)</span>
+              </span>
+              <span id="selectedDateCountPill" class="roster-count-pill">1일 선택</span>
             </div>
 
+            <div class="calendar-box" id="multiDateCalendar">
+              <div class="calendar-toolbar">
+                <div class="calendar-nav">
+                  <button type="button" id="calPrevMonthBtn" class="calendar-nav-btn" aria-label="이전 달">&#8249;</button>
+                  <span id="calMonthLabel" class="calendar-month-label"></span>
+                  <button type="button" id="calNextMonthBtn" class="calendar-nav-btn" aria-label="다음 달">&#8250;</button>
+                </div>
+                <div class="calendar-actions">
+                  <button type="button" id="calTodayBtn" class="calendar-action-btn">오늘</button>
+                  <button type="button" id="calClearDatesBtn" class="calendar-action-btn">전체 해제</button>
+                </div>
+              </div>
+
+              <div id="calWeekdays" class="calendar-weekdays" role="row"></div>
+              <div id="calDaysGrid" class="calendar-days" role="grid"></div>
+
+              <div id="selectedDatesWrap" class="selected-dates-wrap"></div>
+            </div>
+
+            <p class="form-help">
+              달력에서 날짜를 클릭해 여러 일자를 체크할 수 있으며, 상단 요일(일~토)을 클릭하면 해당 월의 같은 요일을 한 번에 선택·해제할 수 있습니다.
+            </p>
+
+            <label class="checkbox-inline">
+              <input type="checkbox" id="inputIsMultiSession" />
+              <span>다회차 프로그램 (날짜 제한 해제)</span>
+            </label>
+          </div>
+
+          <!-- 3) 프로그램 시간 & 4) 강사명 -->
+          <div class="form-grid-2">
             <div class="form-group">
               <label for="inputProgramTime" class="form-label">
                 프로그램 시간 <span class="required-mark" aria-hidden="true">*</span>
@@ -124,20 +147,19 @@
                 required
               />
             </div>
-          </div>
 
-          <!-- 4) 강사명 -->
-          <div class="form-group">
-            <label for="inputInstructor" class="form-label">
-              강사명 <span class="required-mark" aria-hidden="true">*</span>
-            </label>
-            <input
-              type="text"
-              id="inputInstructor"
-              class="form-input"
-              placeholder="예: 김청년"
-              required
-            />
+            <div class="form-group">
+              <label for="inputInstructor" class="form-label">
+                강사명 <span class="required-mark" aria-hidden="true">*</span>
+              </label>
+              <input
+                type="text"
+                id="inputInstructor"
+                class="form-input"
+                placeholder="예: 김청년"
+                required
+              />
+            </div>
           </div>
 
           <!-- 5) 장소(위치) 기반 출석 제한 설정 -->
