@@ -25,12 +25,6 @@ const IDB_VERSION = 1;
 const IDB_STORE_META = 'device_meta';
 const IDB_STORE_SUBMITTED = 'submitted_records';
 
-const BIRTH_YEAR_MAX = 2012;
-const BIRTH_YEAR_MIN = 1960;
-const BIRTH_YEAR_DEFAULT = 2000;
-const BIRTH_MONTH_DEFAULT = 1;
-const BIRTH_DAY_DEFAULT = 1;
-
 const NAME_BLACKLIST = [
   '홍길동',
   '테스트',
@@ -45,13 +39,20 @@ const NAME_BLACKLIST = [
   '이름',
 ];
 
+const ERROR_MSG_INVALID_BIRTH6 = '올바른 생년월일 6자리(예: 960211)를 입력해주세요.';
 const ERROR_MSG_NOT_IN_ROSTER = '출석부에 등록되어있지 않은 정보입니다.';
 const ERROR_MSG_DEVICE_DUPLICATE = '이미 이 기기에서 출석 등록이 완료되었습니다.';
 const ERROR_MSG_PARTICIPANT_DUPLICATE = '이미 출석 처리가 완료된 참가자입니다.';
+const ERROR_MSG_GPS_FAILED = '위치 정보를 확인할 수 없습니다. 스마트폰의 위치(GPS) 권한을 허용해주세요.';
+const ERROR_MSG_INVALID_MANAGER_CODE = '담당자 확인 코드가 일치하지 않습니다.';
+const MANUAL_CONFIRM_NOTE = '담당자 수동확인';
 
 let currentProgram = null;
 let currentDeviceId = '';
 let currentDeviceFingerprint = '';
+let currentAttendanceDate = '';
+let manualModalTriggerSource = 'form'; // 'form' | 'already'
+let approvedManualCode = ''; // 담당자 확인 코드 사전 승인 상태
 
 // ============================================================================
 // 기기 식별자 (localStorage + IndexedDB) 및 보조 지문(deviceFingerprint)
@@ -150,9 +151,6 @@ async function idbSet(storeName, key, value) {
   });
 }
 
-/**
- * localStorage와 IndexedDB 양쪽에 영구 저장되는 고유 기기 식별자(gjyouth_device_id) 획득
- */
 async function ensurePersistentDeviceId() {
   let lsId = '';
   try {
@@ -178,7 +176,6 @@ async function ensurePersistentDeviceId() {
     resolvedId = generateUuidV4();
   }
 
-  // 양쪽 스토리지 동기화 유지
   try {
     localStorage.setItem(STORAGE_KEY_DEVICE_ID, resolvedId);
   } catch (err) {}
@@ -187,9 +184,6 @@ async function ensurePersistentDeviceId() {
   return resolvedId;
 }
 
-/**
- * 브라우저 하드웨어/환경 특성 기반 보조 지문(deviceFingerprint) 생성
- */
 async function generateDeviceFingerprint() {
   let canvasSig = '';
   try {
@@ -232,7 +226,6 @@ async function generateDeviceFingerprint() {
     canvasSig,
   ].join('|');
 
-  // SHA-256 해시 (Web Crypto API 사용 가능 시)
   if (window.crypto && window.crypto.subtle && window.TextEncoder) {
     try {
       const encoded = new TextEncoder().encode(rawSignals);
@@ -241,12 +234,9 @@ async function generateDeviceFingerprint() {
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('');
       return `fp_${hex.slice(0, 32)}`;
-    } catch (err) {
-      // 폴백 해시 사용
-    }
+    } catch (err) {}
   }
 
-  // 비보안 컨텍스트(http:// 등)용 결정적 64비트 폴백 해시
   let h1 = 0xdeadbeef;
   let h2 = 0x41c6ce57;
   for (let i = 0; i < rawSignals.length; i++) {
@@ -279,13 +269,9 @@ function getLocalSubmittedMap() {
 async function hasDeviceSubmittedLocally(programCode, attendanceDate) {
   const key = buildSubmissionKey(programCode, attendanceDate);
 
-  // 1) localStorage 기록 확인
   const map = getLocalSubmittedMap();
-  if (map[key]) {
-    return map[key];
-  }
+  if (map[key]) return map[key];
 
-  // 2) IndexedDB 기록 확인 (localStorage만 비웠을 때 복원/차단)
   const idbRecord = await idbGet(IDB_STORE_SUBMITTED, key);
   if (idbRecord) {
     try {
@@ -295,7 +281,6 @@ async function hasDeviceSubmittedLocally(programCode, attendanceDate) {
     return idbRecord;
   }
 
-  // 3) 테스트 모드인 경우 참가자명단 저장소에서도 기기ID/지문으로 대조
   if (IS_TEST_MODE) {
     const participants = getLocalParticipants();
     const matched = participants.find(
@@ -335,17 +320,30 @@ async function markDeviceSubmittedLocally(programCode, attendanceDate, meta = {}
 }
 
 // ============================================================================
-// 날짜 / 연령구분 / 유효성 검증 유틸리티
+// 날짜 / 위치(Haversine) / 생년월일 6자리 / 연령구분 / 유효성 검증 유틸리티
 // ============================================================================
+
+function parseBoolFlag(val) {
+  if (typeof val === 'boolean') return val;
+  const s = String(val || '').trim().toUpperCase();
+  return s === 'Y' || s === 'TRUE' || s === '1' || s === 'YES';
+}
+
+/**
+ * 접속 시점의 시스템 현지 날짜를 YYYY-MM-DD 형식으로 반환
+ */
+function getSystemLocalIsoDate(dateObj = new Date()) {
+  const y = dateObj.getFullYear();
+  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const d = String(dateObj.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
 
 /**
  * 접속 시점의 시스템 현지 날짜를 YYYY/MM/DD 형식으로 반환
  */
 function getSystemLocalAttendanceDate(dateObj = new Date()) {
-  const y = dateObj.getFullYear();
-  const m = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const d = String(dateObj.getDate()).padStart(2, '0');
-  return `${y}/${m}/${d}`;
+  return getSystemLocalIsoDate(dateObj).replace(/-/g, '/');
 }
 
 /**
@@ -375,9 +373,7 @@ function getKstDateTimeParts(dateObj = new Date()) {
         regTime: `${hour}:${map.minute}:${map.second}`,
       };
     }
-  } catch (err) {
-    // 폴백: UTC+9 계산
-  }
+  } catch (err) {}
   const kst = new Date(dateObj.getTime() + 9 * 60 * 60 * 1000);
   const y = kst.getUTCFullYear();
   const pad = (n) => String(n).padStart(2, '0');
@@ -392,7 +388,6 @@ function getKstDateTimeParts(dateObj = new Date()) {
  * 연도별 청년 연령 자동 계산 (하드코딩 금지)
  * - 등록 연도(currentYear) 기준 연 나이 19세~39세
  *   (currentYear - 39 이상 currentYear - 19 이하) => '청년', 그 외 => '청년외'
- *   예: 2026년 -> 1987~2007년생 청년 / 2027년 -> 1988~2008년생 청년
  */
 function calculateAgeGroup(birthDateStr, referenceYear) {
   const currentYear = Number(referenceYear) || getKstDateTimeParts().year;
@@ -409,9 +404,83 @@ function calculateAgeGroup(birthDateStr, referenceYear) {
   return '청년외';
 }
 
-function getDaysInMonth(year, month) {
-  if (!year || !month) return 31;
-  return new Date(Number(year), Number(month), 0).getDate();
+/**
+ * 생년월일 6자리(YYMMDD) 검증 및 YYYY-MM-DD 변환
+ * - 60 ~ 99 => 1960 ~ 1999년
+ * - 00 ~ 12 => 2000 ~ 2012년
+ * - 그 외 연도(13 ~ 59) 또는 존재하지 않는 월/일 차단
+ */
+function parseBirthDate6(rawValue) {
+  const digits = String(rawValue || '').replace(/\D/g, '');
+  if (!/^\d{6}$/.test(digits)) {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  const yy = parseInt(digits.slice(0, 2), 10);
+  const mm = parseInt(digits.slice(2, 4), 10);
+  const dd = parseInt(digits.slice(4, 6), 10);
+
+  let fullYear = null;
+  if (yy >= 60 && yy <= 99) {
+    fullYear = 1900 + yy;
+  } else if (yy >= 0 && yy <= 12) {
+    fullYear = 2000 + yy;
+  } else {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  if (mm < 1 || mm > 12) {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  const maxDays = new Date(fullYear, mm, 0).getDate();
+  if (dd < 1 || dd > maxDays) {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  const iso = `${fullYear}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  return { valid: true, iso, digits, fullYear };
+}
+
+/**
+ * 하버사인(Haversine) 공식으로 두 GPS 좌표 간 직선거리(m) 계산
+ */
+function calculateHaversineDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371000; // 지구 반지름 (미터)
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * 현재 GPS 좌표 조회 (enableHighAccuracy: true, timeout: 10000)
+ */
+function getCurrentGpsPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('geolocation_unsupported'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        resolve({
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+        });
+      },
+      (err) => reject(err),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  });
 }
 
 function normalizeGender(raw) {
@@ -442,18 +511,20 @@ function normalizeRosterList(raw) {
       if (!entry || typeof entry !== 'object') return null;
       const name = String(entry.name || '').replace(/\s+/g, '');
       if (!name) return null;
+      let birthDate = String(entry.birthDate || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
+        const parsed = parseBirthDate6(birthDate);
+        if (parsed.valid) birthDate = parsed.iso;
+      }
       return {
         name,
-        birthDate: String(entry.birthDate || '').trim(),
+        birthDate,
         gender: normalizeGender(entry.gender),
       };
     })
     .filter(Boolean);
 }
 
-/**
- * 참가자명 검증: 공백 제거 후 한글 완성형 2~5자, 동일 글자 3회 연속 반복 금지, 블랙리스트 차단
- */
 function validateParticipantName(rawValue) {
   const cleaned = String(rawValue || '').replace(/\s+/g, '');
 
@@ -482,9 +553,6 @@ function validateParticipantName(rawValue) {
   return { valid: true, cleanedName: cleaned };
 }
 
-/**
- * 출석부 명단(이름 + 생년월일 + 성별) 정확 일치 대조
- */
 function verifyRosterMatch({ name, birthDate, gender }, rawRoster) {
   const roster = normalizeRosterList(rawRoster);
   if (roster.length === 0) {
@@ -539,17 +607,35 @@ function saveLocalParticipants(list) {
   localStorage.setItem(STORAGE_KEY_PARTICIPANTS, JSON.stringify(list));
 }
 
+function normalizeProgramResponse(raw) {
+  if (!raw) return null;
+  const roster = normalizeRosterList(raw.roster || raw.preRegisteredList);
+  const locationEnabled = parseBoolFlag(raw.locationEnabled);
+  const hasManagerCode =
+    typeof raw.hasManagerCode === 'boolean'
+      ? raw.hasManagerCode
+      : Boolean(String(raw.managerCode || '').trim());
+
+  return {
+    ...raw,
+    roster,
+    preRegisteredList: roster,
+    isMultiSession: parseBoolFlag(raw.isMultiSession),
+    locationEnabled,
+    locationName: String(raw.locationName || '').trim(),
+    latitude: raw.latitude !== undefined && raw.latitude !== '' ? Number(raw.latitude) : null,
+    longitude: raw.longitude !== undefined && raw.longitude !== '' ? Number(raw.longitude) : null,
+    allowedRadius: Number(raw.allowedRadius) || 300,
+    hasManagerCode,
+    managerCode: String(raw.managerCode || '').trim(),
+  };
+}
+
 async function fetchProgramByCode(code, deviceCheck = {}) {
   if (IS_TEST_MODE) {
     const programs = getLocalPrograms();
     const found = programs.find((item) => item.code === code);
-    if (!found) return null;
-    const roster = normalizeRosterList(found.roster || found.preRegisteredList);
-    return {
-      ...found,
-      roster,
-      preRegisteredList: roster,
-    };
+    return normalizeProgramResponse(found || null);
   }
 
   if (!GAS_WEB_APP_URL) {
@@ -580,15 +666,67 @@ async function fetchProgramByCode(code, deviceCheck = {}) {
 
   const result = await response.json();
   if (result.status === 'success' && result.data) {
-    return result.data;
+    return normalizeProgramResponse(result.data);
   }
   return null;
+}
+
+/**
+ * 담당자 확인 코드 검증 (모달 사전 승인 / 기기 중복 화면 우회용)
+ */
+async function verifyProgramManagerCode(programCode, managerCode) {
+  const inputCode = String(managerCode || '').trim();
+  if (!inputCode) {
+    return { ok: false, message: ERROR_MSG_INVALID_MANAGER_CODE };
+  }
+
+  if (IS_TEST_MODE) {
+    const programs = getLocalPrograms();
+    const program = programs.find((item) => item.code === programCode);
+    if (!program) {
+      return { ok: false, message: '유효하지 않은 프로그램입니다.' };
+    }
+    const savedCode = String(program.managerCode || '').trim() || '1234';
+    if (inputCode !== savedCode) {
+      return { ok: false, message: ERROR_MSG_INVALID_MANAGER_CODE };
+    }
+    return { ok: true };
+  }
+
+  if (!GAS_WEB_APP_URL) {
+    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다.');
+  }
+
+  const response = await fetch(GAS_WEB_APP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    redirect: 'follow',
+    body: JSON.stringify({
+      action: 'verifyManagerCode',
+      programCode,
+      managerCode: inputCode,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`서버 응답 오류 (HTTP ${response.status})`);
+  }
+
+  const result = await response.json();
+  if (result.status === 'success') {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    message: result.message || ERROR_MSG_INVALID_MANAGER_CODE,
+  };
 }
 
 async function submitAttendanceRecord(payload) {
   if (IS_TEST_MODE) {
     const programs = getLocalPrograms();
-    const program = programs.find((item) => item.code === payload.programCode);
+    const rawProgram = programs.find((item) => item.code === payload.programCode);
+    const program = normalizeProgramResponse(rawProgram);
     if (!program) {
       return {
         status: 'not_found',
@@ -596,15 +734,66 @@ async function submitAttendanceRecord(payload) {
       };
     }
 
-    // 1) 출석부 명단이 등록되어 있는 경우 이름 + 생년월일 + 성별 정확 일치 대조
-    const roster = normalizeRosterList(program.roster || program.preRegisteredList);
+    const isManual = Boolean(payload.manualOverride);
+
+    // 0) 담당자 수동 출석 승인 시 확인 코드 검증
+    if (isManual) {
+      const providedCode = String(payload.managerCode || '').trim();
+      const expectedCode = String(program.managerCode || '').trim() || '1234';
+      if (!providedCode || providedCode !== expectedCode) {
+        return {
+          status: 'invalid_manager_code',
+          message: ERROR_MSG_INVALID_MANAGER_CODE,
+        };
+      }
+    }
+
+    // 1) 프로그램 일자 검증 (다회차 프로그램이 아닌 경우 당일만 허용)
+    const todayIso = getSystemLocalIsoDate();
+    if (!program.isMultiSession && program.date && program.date !== todayIso) {
+      return {
+        status: 'invalid_date',
+        message: `출석 가능한 일자가 아닙니다. (프로그램 일자: ${program.date})`,
+      };
+    }
+
+    // 2) 위치 기반 출석 제한 검증 (수동 출석 승인 시 우회)
+    if (program.locationEnabled && !isManual) {
+      const targetLat = Number(program.latitude);
+      const targetLng = Number(program.longitude);
+      const userLat = Number(payload.userLat);
+      const userLng = Number(payload.userLng);
+      const radius = Number(program.allowedRadius) || 300;
+
+      if (
+        !Number.isFinite(userLat) ||
+        !Number.isFinite(userLng) ||
+        !Number.isFinite(targetLat) ||
+        !Number.isFinite(targetLng)
+      ) {
+        return {
+          status: 'gps_error',
+          message: ERROR_MSG_GPS_FAILED,
+        };
+      }
+
+      const distance = calculateHaversineDistanceMeters(targetLat, targetLng, userLat, userLng);
+      if (distance > radius) {
+        return {
+          status: 'out_of_range',
+          message: `지정된 프로그램 장소 인근(반경 ${radius}m 이내)에서만 출석 등록이 가능합니다.`,
+        };
+      }
+    }
+
+    // 3) 출석부 명단이 등록되어 있는 경우 이름 + 생년월일 + 성별 정확 일치 대조
     const rosterCheck = verifyRosterMatch(
       {
         name: payload.participantName,
         birthDate: payload.birthDate,
         gender: payload.gender,
       },
-      roster
+      program.roster
     );
     if (!rosterCheck.matched) {
       return {
@@ -615,22 +804,24 @@ async function submitAttendanceRecord(payload) {
 
     const participants = getLocalParticipants();
 
-    // 2) 같은 프로그램코드 + 출석일자 내 동일 기기(deviceId 또는 deviceFingerprint) 차단
-    const isDeviceDuplicate = participants.some(
-      (row) =>
-        row.programCode === payload.programCode &&
-        row.attendanceDate === payload.attendanceDate &&
-        ((payload.deviceId && row.deviceId === payload.deviceId) ||
-          (payload.deviceFingerprint && row.deviceFingerprint === payload.deviceFingerprint))
-    );
-    if (isDeviceDuplicate) {
-      return {
-        status: 'device_duplicate',
-        message: ERROR_MSG_DEVICE_DUPLICATE,
-      };
+    // 4) 같은 프로그램코드 + 출석일자 내 동일 기기 차단 (담당자 수동 출석 승인 시 우회)
+    if (!isManual) {
+      const isDeviceDuplicate = participants.some(
+        (row) =>
+          row.programCode === payload.programCode &&
+          row.attendanceDate === payload.attendanceDate &&
+          ((payload.deviceId && row.deviceId === payload.deviceId) ||
+            (payload.deviceFingerprint && row.deviceFingerprint === payload.deviceFingerprint))
+      );
+      if (isDeviceDuplicate) {
+        return {
+          status: 'device_duplicate',
+          message: ERROR_MSG_DEVICE_DUPLICATE,
+        };
+      }
     }
 
-    // 3) 같은 프로그램코드 + 출석일자 내 동일 참가자(참가자명 + 생년월일) 중복 차단
+    // 5) 같은 프로그램코드 + 출석일자 내 동일 참가자(참가자명 + 생년월일) 중복 차단
     const isParticipantDuplicate = participants.some(
       (row) =>
         row.programCode === payload.programCode &&
@@ -647,6 +838,7 @@ async function submitAttendanceRecord(payload) {
 
     const kst = getKstDateTimeParts();
     const ageGroup = calculateAgeGroup(payload.birthDate, kst.year);
+    const note = isManual ? MANUAL_CONFIRM_NOTE : '';
 
     const record = {
       regDate: kst.regDate,
@@ -661,6 +853,7 @@ async function submitAttendanceRecord(payload) {
       privacyConsent: payload.privacyConsent,
       deviceId: payload.deviceId,
       deviceFingerprint: payload.deviceFingerprint,
+      note,
     };
 
     participants.push(record);
@@ -702,12 +895,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // 화면 섹션
   const loadingSection = document.getElementById('loadingSection');
   const invalidSection = document.getElementById('invalidSection');
+  const invalidTitle = document.getElementById('invalidTitle');
   const invalidMessage = document.getElementById('invalidMessage');
   const alreadySubmittedSection = document.getElementById('alreadySubmittedSection');
   const alreadySummaryBox = document.getElementById('alreadySummaryBox');
   const alreadyProgramName = document.getElementById('alreadyProgramName');
   const alreadyAttendanceDate = document.getElementById('alreadyAttendanceDate');
+  const alreadyManualWrap = document.getElementById('alreadyManualWrap');
+  const openManualFromAlreadyBtn = document.getElementById('openManualFromAlreadyBtn');
   const formSection = document.getElementById('formSection');
+  const manualModeBanner = document.getElementById('manualModeBanner');
   const completeSection = document.getElementById('completeSection');
   const testModeBadge = document.getElementById('testModeBadge');
 
@@ -716,14 +913,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const programNameInput = document.getElementById('programName');
   const programSchedule = document.getElementById('programSchedule');
   const programInstructor = document.getElementById('programInstructor');
+  const programLocationDivider = document.getElementById('programLocationDivider');
+  const programLocationInfo = document.getElementById('programLocationInfo');
   const attendanceDateInput = document.getElementById('attendanceDate');
   const participantNameInput = document.getElementById('participantName');
-  const birthYearSelect = document.getElementById('birthYear');
-  const birthMonthSelect = document.getElementById('birthMonth');
-  const birthDaySelect = document.getElementById('birthDay');
+  const birthDateInput = document.getElementById('birthDateInput');
   const genderSegment = document.getElementById('genderSegment');
   const genderValueInput = document.getElementById('genderValue');
   const submitBtn = document.getElementById('submitBtn');
+  const formManualWrap = document.getElementById('formManualWrap');
+  const openManualModalBtn = document.getElementById('openManualModalBtn');
 
   // 오류 표시 요소
   const nameError = document.getElementById('nameError');
@@ -737,66 +936,38 @@ document.addEventListener('DOMContentLoaded', () => {
   const summaryAttendanceDate = document.getElementById('summaryAttendanceDate');
   const summaryParticipantName = document.getElementById('summaryParticipantName');
 
+  // 담당자 수동 출석 확인 모달 요소
+  const manualVerifyModal = document.getElementById('manualVerifyModal');
+  const manualVerifyForm = document.getElementById('manualVerifyForm');
+  const manualCodeInput = document.getElementById('manualCodeInput');
+  const manualCodeError = document.getElementById('manualCodeError');
+  const closeManualModalBtn = document.getElementById('closeManualModalBtn');
+  const cancelManualBtn = document.getElementById('cancelManualBtn');
+  const confirmManualBtn = document.getElementById('confirmManualBtn');
+
   if (IS_TEST_MODE && testModeBadge) {
     testModeBadge.classList.remove('hidden');
   }
 
   // --------------------------------------------------------------------------
-  // 1. 생년월일 드롭다운 초기화 (연도 2012~1960 기본 2000, 윤년/말일 자동 보정)
+  // 1. 생년월일 6자리 숫자 전용 입력 처리 (예: 960211)
   // --------------------------------------------------------------------------
-  function populateDayOptions(year, month, preferredDay) {
-    const maxDays = getDaysInMonth(year, month);
-    const targetDay = Math.min(Number(preferredDay) || 1, maxDays);
-    birthDaySelect.innerHTML = '';
-    for (let d = 1; d <= maxDays; d++) {
-      const opt = document.createElement('option');
-      opt.value = String(d).padStart(2, '0');
-      opt.textContent = `${d}일`;
-      if (d === targetDay) opt.selected = true;
-      birthDaySelect.appendChild(opt);
+  birthDateInput.addEventListener('input', () => {
+    const digitsOnly = birthDateInput.value.replace(/\D/g, '').slice(0, 6);
+    if (birthDateInput.value !== digitsOnly) {
+      birthDateInput.value = digitsOnly;
     }
-  }
+    clearFieldError(birthError, [birthDateInput]);
+    hideFormAlert();
+  });
 
-  function initBirthDateDropdowns() {
-    birthYearSelect.innerHTML = '';
-    for (let y = BIRTH_YEAR_MAX; y >= BIRTH_YEAR_MIN; y--) {
-      const opt = document.createElement('option');
-      opt.value = String(y);
-      opt.textContent = `${y}년`;
-      if (y === BIRTH_YEAR_DEFAULT) opt.selected = true;
-      birthYearSelect.appendChild(opt);
+  birthDateInput.addEventListener('blur', () => {
+    if (!birthDateInput.value.trim()) return;
+    const check = parseBirthDate6(birthDateInput.value);
+    if (!check.valid) {
+      showFieldError(birthError, check.message, [birthDateInput]);
     }
-
-    birthMonthSelect.innerHTML = '';
-    for (let m = 1; m <= 12; m++) {
-      const opt = document.createElement('option');
-      opt.value = String(m).padStart(2, '0');
-      opt.textContent = `${m}월`;
-      if (m === BIRTH_MONTH_DEFAULT) opt.selected = true;
-      birthMonthSelect.appendChild(opt);
-    }
-
-    populateDayOptions(BIRTH_YEAR_DEFAULT, BIRTH_MONTH_DEFAULT, BIRTH_DAY_DEFAULT);
-
-    const syncDays = () => {
-      populateDayOptions(
-        Number(birthYearSelect.value),
-        Number(birthMonthSelect.value),
-        Number(birthDaySelect.value)
-      );
-      clearFieldError(birthError, [birthYearSelect, birthMonthSelect, birthDaySelect]);
-      hideFormAlert();
-    };
-
-    birthYearSelect.addEventListener('change', syncDays);
-    birthMonthSelect.addEventListener('change', syncDays);
-    birthDaySelect.addEventListener('change', () => {
-      clearFieldError(birthError, [birthYearSelect, birthMonthSelect, birthDaySelect]);
-      hideFormAlert();
-    });
-  }
-
-  initBirthDateDropdowns();
+  });
 
   // --------------------------------------------------------------------------
   // 2. 성별 버튼식 선택 ([남] / [여])
@@ -865,8 +1036,11 @@ document.addEventListener('DOMContentLoaded', () => {
     completeSection.classList.add('hidden');
   }
 
-  function showInvalidScreen(customMessage) {
+  function showInvalidScreen(customMessage, customTitle) {
     hideAllSections();
+    if (customTitle && invalidTitle) {
+      invalidTitle.textContent = customTitle;
+    }
     if (customMessage) {
       invalidMessage.textContent = customMessage;
     }
@@ -882,15 +1056,38 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       alreadySummaryBox.classList.add('hidden');
     }
+
+    alreadyManualWrap.classList.remove('hidden');
     alreadySubmittedSection.classList.remove('hidden');
   }
 
   function showFormScreen(program, attendanceDate) {
     currentProgram = program;
+    currentAttendanceDate = attendanceDate;
 
     programNameInput.value = program.name;
     programSchedule.textContent = `${program.date} · ${program.time}`;
     programInstructor.textContent = `강사: ${program.instructor}`;
+
+    if (program.locationEnabled) {
+      const placePrefix = program.locationName ? `${program.locationName} ` : '';
+      programLocationInfo.textContent = `장소: ${placePrefix}(반경 ${program.allowedRadius}m 이내)`;
+      programLocationDivider.classList.remove('hidden');
+      programLocationInfo.classList.remove('hidden');
+    } else {
+      programLocationDivider.classList.add('hidden');
+      programLocationInfo.classList.add('hidden');
+    }
+
+    // 담당자 수동 출석 확인 버튼 상시 노출
+    formManualWrap.classList.remove('hidden');
+
+    if (approvedManualCode) {
+      manualModeBanner.classList.remove('hidden');
+    } else {
+      manualModeBanner.classList.add('hidden');
+    }
+
     attendanceDateInput.value = attendanceDate;
 
     hideFormAlert();
@@ -909,99 +1106,29 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --------------------------------------------------------------------------
-  // 5. 초기 진입: 기기 식별자 생성 -> 프로그램 조회 -> 동일 기기 기출석 여부 즉시 확인
+  // 5. 폼 입력값 검증 헬퍼
   // --------------------------------------------------------------------------
-  async function initPage() {
-    const params = new URLSearchParams(window.location.search);
-    const code = (params.get('code') || '').trim();
-
-    if (!code) {
-      showInvalidScreen(
-        '유효하지 않은 프로그램 접근입니다. 현장에 비치된 QR코드를 다시 스캔해주세요.'
-      );
-      return;
-    }
-
-    const attendanceDate = getSystemLocalAttendanceDate();
-
-    try {
-      // 기기 고유 식별자(localStorage + IndexedDB) 및 보조 지문 생성
-      const [deviceId, deviceFingerprint] = await Promise.all([
-        ensurePersistentDeviceId(),
-        generateDeviceFingerprint(),
-      ]);
-      currentDeviceId = deviceId;
-      currentDeviceFingerprint = deviceFingerprint;
-
-      // 프로그램 정보 조회
-      const program = await fetchProgramByCode(code, {
-        deviceId,
-        deviceFingerprint,
-        attendanceDate,
-      });
-
-      if (!program) {
-        showInvalidScreen(
-          '유효하지 않은 프로그램 접근입니다. 현장에 비치된 QR코드를 다시 스캔해주세요.'
-        );
-        return;
-      }
-
-      // 동일 기기로 동일 프로그램·동일 출석일자에 이미 출석한 경우 폼 숨기고 즉시 안내 표시
-      const localPrev = await hasDeviceSubmittedLocally(program.code, attendanceDate);
-      if (localPrev || program.alreadySubmittedOnDevice) {
-        await markDeviceSubmittedLocally(program.code, attendanceDate, {
-          programName: program.name,
-        });
-        showAlreadySubmittedScreen({
-          programName: program.name,
-          attendanceDate,
-        });
-        return;
-      }
-
-      showFormScreen(program, attendanceDate);
-    } catch (err) {
-      showInvalidScreen(
-        '프로그램 정보를 불러오는 중 오류가 발생했습니다. 잠시 후 QR코드를 다시 스캔해주세요.'
-      );
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // 6. 본인 출석 등록 제출 처리
-  // --------------------------------------------------------------------------
-  attendanceForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!currentProgram) return;
-
+  function validateAttendanceFormInputs({ focusInvalid = true } = {}) {
     hideFormAlert();
     clearFieldError(nameError, [participantNameInput]);
-    clearFieldError(birthError, [birthYearSelect, birthMonthSelect, birthDaySelect]);
+    clearFieldError(birthError, [birthDateInput]);
     clearFieldError(genderError, [genderSegment]);
     clearFieldError(consentError);
 
     let firstInvalidEl = null;
 
-    // 1) 이름 검증 (공백 제거 후 한글 완성형 2~5자, 3회 연속 반복 금지, 블랙리스트 차단)
+    // 1) 참가자명 검증
     const nameCheck = validateParticipantName(participantNameInput.value);
     if (!nameCheck.valid) {
       showFieldError(nameError, nameCheck.message, [participantNameInput]);
       firstInvalidEl = firstInvalidEl || participantNameInput;
     }
 
-    // 2) 생년월일 조합 (YYYY-MM-DD)
-    const yearVal = birthYearSelect.value;
-    const monthVal = birthMonthSelect.value;
-    const dayVal = birthDaySelect.value;
-    const birthDate = `${yearVal}-${monthVal}-${dayVal}`;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
-      showFieldError(birthError, '생년월일을 올바르게 선택해주세요.', [
-        birthYearSelect,
-        birthMonthSelect,
-        birthDaySelect,
-      ]);
-      firstInvalidEl = firstInvalidEl || birthYearSelect;
+    // 2) 생년월일 6자리 검증 및 YYYY-MM-DD 변환
+    const birthCheck = parseBirthDate6(birthDateInput.value);
+    if (!birthCheck.valid) {
+      showFieldError(birthError, birthCheck.message, [birthDateInput]);
+      firstInvalidEl = firstInvalidEl || birthDateInput;
     }
 
     // 3) 성별 검증
@@ -1023,22 +1150,269 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (firstInvalidEl) {
-      firstInvalidEl.focus();
+      if (focusInvalid) firstInvalidEl.focus();
+      return { valid: false };
+    }
+
+    return {
+      valid: true,
+      cleanedName: nameCheck.cleanedName,
+      birthDate: birthCheck.iso,
+      gender: genderVal,
+      privacyConsent: consentVal,
+    };
+  }
+
+  // --------------------------------------------------------------------------
+  // 6. 담당자 수동 출석 확인 모달 제어
+  // --------------------------------------------------------------------------
+  function openManualModal(source = 'form') {
+    manualModalTriggerSource = source;
+    manualCodeInput.value = '';
+    clearFieldError(manualCodeError, [manualCodeInput]);
+    manualVerifyModal.classList.remove('hidden');
+    manualCodeInput.focus();
+  }
+
+  function closeManualModal() {
+    manualVerifyModal.classList.add('hidden');
+    manualCodeInput.value = '';
+    clearFieldError(manualCodeError, [manualCodeInput]);
+  }
+
+  openManualModalBtn.addEventListener('click', () => openManualModal('form'));
+  openManualFromAlreadyBtn.addEventListener('click', () => openManualModal('already'));
+  closeManualModalBtn.addEventListener('click', closeManualModal);
+  cancelManualBtn.addEventListener('click', closeManualModal);
+
+  manualVerifyModal.addEventListener('click', (e) => {
+    if (e.target === manualVerifyModal) {
+      closeManualModal();
+    }
+  });
+
+  manualCodeInput.addEventListener('input', () => {
+    clearFieldError(manualCodeError, [manualCodeInput]);
+  });
+
+  manualVerifyForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!currentProgram) return;
+
+    const enteredCode = manualCodeInput.value.trim();
+    if (!enteredCode) {
+      showFieldError(manualCodeError, '담당자 확인 코드를 입력해주세요.', [manualCodeInput]);
+      manualCodeInput.focus();
       return;
     }
 
+    confirmManualBtn.disabled = true;
+    confirmManualBtn.textContent = '확인 중...';
+
+    try {
+      // 케이스 1: 기출석 안내 화면에서 수동 확인 진입 -> 코드 검증 후 폼 열기
+      if (manualModalTriggerSource === 'already') {
+        const verify = await verifyProgramManagerCode(currentProgram.code, enteredCode);
+        if (!verify.ok) {
+          showFieldError(manualCodeError, verify.message || ERROR_MSG_INVALID_MANAGER_CODE, [
+            manualCodeInput,
+          ]);
+          manualCodeInput.focus();
+          return;
+        }
+        approvedManualCode = enteredCode;
+        closeManualModal();
+        showFormScreen(currentProgram, currentAttendanceDate || getSystemLocalAttendanceDate());
+        participantNameInput.focus();
+        return;
+      }
+
+      // 케이스 2: 폼 화면에서 수동 확인 진입
+      const formCheck = validateAttendanceFormInputs({ focusInvalid: false });
+
+      // 아직 폼 입력이 덜 된 경우: 코드만 먼저 검증하고 수동 모드 활성화 후 폼으로 포커스
+      if (!formCheck.valid) {
+        const verify = await verifyProgramManagerCode(currentProgram.code, enteredCode);
+        if (!verify.ok) {
+          showFieldError(manualCodeError, verify.message || ERROR_MSG_INVALID_MANAGER_CODE, [
+            manualCodeInput,
+          ]);
+          manualCodeInput.focus();
+          return;
+        }
+        approvedManualCode = enteredCode;
+        closeManualModal();
+        manualModeBanner.classList.remove('hidden');
+        validateAttendanceFormInputs({ focusInvalid: true });
+        return;
+      }
+
+      // 폼 입력이 완료된 경우: 즉시 담당자 수동 출석 승인 제출 (GPS 및 기기 중복 제한 우회)
+      const attendanceDate = attendanceDateInput.value || getSystemLocalAttendanceDate();
+
+      // 로컬/출석부 1차 대조
+      const roster = normalizeRosterList(
+        currentProgram.roster || currentProgram.preRegisteredList
+      );
+      if (roster.length > 0) {
+        const rosterCheck = verifyRosterMatch(
+          {
+            name: formCheck.cleanedName,
+            birthDate: formCheck.birthDate,
+            gender: formCheck.gender,
+          },
+          roster
+        );
+        if (!rosterCheck.matched) {
+          closeManualModal();
+          showFormAlert(ERROR_MSG_NOT_IN_ROSTER);
+          return;
+        }
+      }
+
+      const result = await submitAttendanceRecord({
+        programCode: currentProgram.code,
+        programName: currentProgram.name,
+        attendanceDate,
+        participantName: formCheck.cleanedName,
+        birthDate: formCheck.birthDate,
+        gender: formCheck.gender,
+        privacyConsent: formCheck.privacyConsent,
+        deviceId: currentDeviceId,
+        deviceFingerprint: currentDeviceFingerprint,
+        manualOverride: true,
+        managerCode: enteredCode,
+      });
+
+      if (result.status === 'invalid_manager_code') {
+        showFieldError(manualCodeError, result.message || ERROR_MSG_INVALID_MANAGER_CODE, [
+          manualCodeInput,
+        ]);
+        manualCodeInput.focus();
+        return;
+      }
+
+      if (result.status === 'success') {
+        closeManualModal();
+        approvedManualCode = '';
+        await markDeviceSubmittedLocally(currentProgram.code, attendanceDate, {
+          programName: currentProgram.name,
+        });
+        showCompleteScreen({
+          programName: currentProgram.name,
+          attendanceDate,
+          participantName: formCheck.cleanedName,
+        });
+        return;
+      }
+
+      closeManualModal();
+      showFormAlert(result.message || '수동 출석 처리 중 오류가 발생했습니다.');
+    } catch (err) {
+      showFieldError(
+        manualCodeError,
+        '서버와 통신하는 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.',
+        [manualCodeInput]
+      );
+    } finally {
+      confirmManualBtn.disabled = false;
+      confirmManualBtn.textContent = '수동 출석 승인';
+    }
+  });
+
+  // --------------------------------------------------------------------------
+  // 7. 초기 진입: 기기 식별자 생성 -> 프로그램 조회 -> 일자/다회차 검증 -> 기출석 확인
+  // --------------------------------------------------------------------------
+  async function initPage() {
+    const params = new URLSearchParams(window.location.search);
+    const code = (params.get('code') || '').trim();
+
+    if (!code) {
+      showInvalidScreen(
+        '유효하지 않은 프로그램 접근입니다. 현장에 비치된 QR코드를 다시 스캔해주세요.'
+      );
+      return;
+    }
+
+    const todayIso = getSystemLocalIsoDate();
+    const attendanceDate = getSystemLocalAttendanceDate();
+    currentAttendanceDate = attendanceDate;
+
+    try {
+      const [deviceId, deviceFingerprint] = await Promise.all([
+        ensurePersistentDeviceId(),
+        generateDeviceFingerprint(),
+      ]);
+      currentDeviceId = deviceId;
+      currentDeviceFingerprint = deviceFingerprint;
+
+      const program = await fetchProgramByCode(code, {
+        deviceId,
+        deviceFingerprint,
+        attendanceDate,
+      });
+
+      if (!program) {
+        showInvalidScreen(
+          '유효하지 않은 프로그램 접근입니다. 현장에 비치된 QR코드를 다시 스캔해주세요.'
+        );
+        return;
+      }
+
+      currentProgram = program;
+
+      // 프로그램 일자 유효성 검증 (다회차 프로그램이 아닌 경우 설정된 일자와 오늘 날짜가 일치해야 함)
+      if (!program.isMultiSession && program.date && program.date !== todayIso) {
+        showInvalidScreen(
+          `출석 가능한 일자가 아닙니다. (프로그램 일자: ${program.date})`,
+          '출석 가능한 일자가 아닙니다'
+        );
+        return;
+      }
+
+      // 동일 기기 기출석 여부 확인
+      const localPrev = await hasDeviceSubmittedLocally(program.code, attendanceDate);
+      if (localPrev || program.alreadySubmittedOnDevice) {
+        await markDeviceSubmittedLocally(program.code, attendanceDate, {
+          programName: program.name,
+        });
+        showAlreadySubmittedScreen({
+          programName: program.name,
+          attendanceDate,
+        });
+        return;
+      }
+
+      showFormScreen(program, attendanceDate);
+    } catch (err) {
+      showInvalidScreen(
+        '프로그램 정보를 불러오는 중 오류가 발생했습니다. 잠시 후 QR코드를 다시 스캔해주세요.'
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 8. 본인 출석 등록 제출 처리 (GPS 반경 검증 포함)
+  // --------------------------------------------------------------------------
+  attendanceForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!currentProgram) return;
+
+    const formCheck = validateAttendanceFormInputs({ focusInvalid: true });
+    if (!formCheck.valid) return;
+
     const attendanceDate = attendanceDateInput.value || getSystemLocalAttendanceDate();
 
-    // 5) 출석부 명단 대조 (로컬 테스트 모드 또는 명단이 내려온 경우 1차 검증; GAS 모드에서는 서버에서도 최종 대조)
+    // 출석부 명단 1차 대조 (로컬 테스트 모드 또는 명단이 내려온 경우)
     const roster = normalizeRosterList(
       currentProgram.roster || currentProgram.preRegisteredList
     );
     if (roster.length > 0) {
       const rosterCheck = verifyRosterMatch(
         {
-          name: nameCheck.cleanedName,
-          birthDate,
-          gender: genderVal,
+          name: formCheck.cleanedName,
+          birthDate: formCheck.birthDate,
+          gender: formCheck.gender,
         },
         roster
       );
@@ -1048,30 +1422,72 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
+    const isManualApproved = Boolean(approvedManualCode);
+    let userLat = null;
+    let userLng = null;
+
     submitBtn.disabled = true;
-    submitBtn.textContent = '출석 등록 중...';
 
     try {
+      // 위치 기반 출석 제한이 켜져 있고 수동 승인 모드가 아닌 경우 GPS 확인
+      if (currentProgram.locationEnabled && !isManualApproved) {
+        submitBtn.textContent = '현재 위치(GPS) 확인 중...';
+        try {
+          const pos = await getCurrentGpsPosition();
+          userLat = pos.latitude;
+          userLng = pos.longitude;
+        } catch (gpsErr) {
+          showFormAlert(ERROR_MSG_GPS_FAILED);
+          return;
+        }
+
+        const targetLat = Number(currentProgram.latitude);
+        const targetLng = Number(currentProgram.longitude);
+        const allowedRadius = Number(currentProgram.allowedRadius) || 300;
+
+        if (Number.isFinite(targetLat) && Number.isFinite(targetLng)) {
+          const distance = calculateHaversineDistanceMeters(
+            targetLat,
+            targetLng,
+            userLat,
+            userLng
+          );
+          if (distance > allowedRadius) {
+            showFormAlert(
+              `지정된 프로그램 장소 인근(반경 ${allowedRadius}m 이내)에서만 출석 등록이 가능합니다.`
+            );
+            return;
+          }
+        }
+      }
+
+      submitBtn.textContent = '출석 등록 중...';
+
       const result = await submitAttendanceRecord({
         programCode: currentProgram.code,
         programName: currentProgram.name,
         attendanceDate,
-        participantName: nameCheck.cleanedName,
-        birthDate,
-        gender: genderVal,
-        privacyConsent: consentVal,
+        participantName: formCheck.cleanedName,
+        birthDate: formCheck.birthDate,
+        gender: formCheck.gender,
+        privacyConsent: formCheck.privacyConsent,
         deviceId: currentDeviceId,
         deviceFingerprint: currentDeviceFingerprint,
+        userLat,
+        userLng,
+        manualOverride: isManualApproved,
+        managerCode: isManualApproved ? approvedManualCode : '',
       });
 
       if (result.status === 'success') {
+        approvedManualCode = '';
         await markDeviceSubmittedLocally(currentProgram.code, attendanceDate, {
           programName: currentProgram.name,
         });
         showCompleteScreen({
           programName: currentProgram.name,
           attendanceDate,
-          participantName: nameCheck.cleanedName,
+          participantName: formCheck.cleanedName,
         });
         return;
       }

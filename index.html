@@ -35,7 +35,7 @@
       <p class="state-message">프로그램 정보를 불러오는 중입니다...</p>
     </section>
 
-    <!-- 2. 유효하지 않은 접근 화면 -->
+    <!-- 2. 유효하지 않은 접근 / 출석 불가 일자 화면 -->
     <section id="invalidSection" class="card state-card hidden" aria-live="assertive">
       <div class="state-icon state-icon--error" aria-hidden="true">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
@@ -44,13 +44,13 @@
           <line x1="12" y1="16" x2="12.01" y2="16"></line>
         </svg>
       </div>
-      <h1 class="state-title">접근할 수 없는 페이지입니다</h1>
+      <h1 id="invalidTitle" class="state-title">접근할 수 없는 페이지입니다</h1>
       <p id="invalidMessage" class="state-message">
         유효하지 않은 프로그램 접근입니다. 현장에 비치된 QR코드를 다시 스캔해주세요.
       </p>
     </section>
 
-    <!-- 3. 동일 기기 기출석 안내 화면 (대리 출석 방지) -->
+    <!-- 3. 동일 기기 기출석 안내 화면 -->
     <section id="alreadySubmittedSection" class="card state-card hidden" aria-live="polite">
       <div class="state-icon state-icon--warning" aria-hidden="true">
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -59,9 +59,8 @@
         </svg>
       </div>
       <h1 class="state-title">이미 이 기기에서 출석 등록이 완료되었습니다.</h1>
-      <p class="state-message">
-        본인 1인 1기기 출석 원칙에 따라 동일 기기에서는 중복 출석 등록이 제한됩니다.
-      </p>
+      <p class="state-message">중복 출석 등록이 제한됩니다.</p>
+
       <div id="alreadySummaryBox" class="summary-box hidden">
         <div class="summary-row">
           <span class="summary-key">프로그램명</span>
@@ -72,10 +71,20 @@
           <span id="alreadyAttendanceDate" class="summary-val"></span>
         </div>
       </div>
+
+      <div id="alreadyManualWrap" class="manual-trigger-wrap" style="margin-top: 16px;">
+        <button type="button" id="openManualFromAlreadyBtn" class="btn-text-link">
+          담당자 수동 출석 확인
+        </button>
+      </div>
     </section>
 
     <!-- 4. 참가자 본인 출석 등록 폼 (1명 전용) -->
     <section id="formSection" class="card hidden">
+      <div id="manualModeBanner" class="manual-mode-banner hidden" role="status">
+        담당자 수동 출석 확인 모드가 활성화되었습니다. 참가자 정보를 입력하고 출석 등록을 완료해주세요.
+      </div>
+
       <div class="card-header">
         <div class="card-title-row">
           <h1 class="card-title">프로그램 출석 등록</h1>
@@ -99,6 +108,8 @@
             <span id="programSchedule" class="program-meta-item"></span>
             <span class="program-meta-divider" aria-hidden="true">|</span>
             <span id="programInstructor" class="program-meta-item"></span>
+            <span id="programLocationDivider" class="program-meta-divider hidden" aria-hidden="true">|</span>
+            <span id="programLocationInfo" class="program-meta-item hidden"></span>
           </div>
         </div>
 
@@ -114,7 +125,7 @@
           />
         </div>
 
-        <!-- 3) 참가자 본인 정보: 이름 / 생년월일(연·월·일 드롭다운) / 성별(남·여 버튼) -->
+        <!-- 3) 참가자 본인 정보: 이름 / 생년월일 6자리 직접 입력 / 성별(남·여 버튼) -->
         <div class="form-group">
           <span class="form-label">
             참가자 정보 <span class="required-mark" aria-hidden="true">*</span>
@@ -136,14 +147,21 @@
               />
             </div>
 
-            <!-- 생년월일 드롭다운 -->
+            <!-- 생년월일 6자리 숫자 직접 입력 -->
             <div>
-              <span class="participant-sub-label">생년월일</span>
-              <div class="birth-select-group" role="group" aria-label="생년월일 선택">
-                <select id="birthYear" name="birthYear" class="form-select" aria-label="출생 연도"></select>
-                <select id="birthMonth" name="birthMonth" class="form-select" aria-label="출생 월"></select>
-                <select id="birthDay" name="birthDay" class="form-select" aria-label="출생 일"></select>
-              </div>
+              <label for="birthDateInput" class="participant-sub-label">생년월일 (6자리)</label>
+              <input
+                type="text"
+                id="birthDateInput"
+                name="birthDate"
+                class="form-input"
+                inputmode="numeric"
+                pattern="[0-9]*"
+                maxlength="6"
+                placeholder="예: 960211"
+                autocomplete="off"
+                required
+              />
             </div>
 
             <!-- 성별 버튼식 선택 -->
@@ -200,13 +218,20 @@
           <p id="consentError" class="field-error" role="alert"></p>
         </div>
 
-        <!-- 폼 공통 오류 메시지 (출석부 미등록, 중복 출석, 통신 오류 등) -->
+        <!-- 폼 공통 오류 메시지 (출석부 미등록, GPS 오류/거리 초과, 중복 출석 등) -->
         <div id="formAlert" class="alert alert--danger hidden" role="alert"></div>
 
         <!-- 제출 버튼 -->
         <button type="submit" id="submitBtn" class="btn btn--primary btn--full">
           출석 등록하기
         </button>
+
+        <!-- 현장 예외 상황 대비 담당자 수동 출석 확인 버튼 (상시 노출) -->
+        <div id="formManualWrap" class="manual-trigger-wrap">
+          <button type="button" id="openManualModalBtn" class="btn-text-link">
+            담당자 수동 출석 확인
+          </button>
+        </div>
       </form>
     </section>
 
@@ -236,6 +261,38 @@
       </div>
     </section>
   </main>
+
+  <!-- 담당자 수동 출석 확인 모달 -->
+  <div id="manualVerifyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="manualModalTitle">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="manualModalTitle" class="modal-title">담당자 수동 출석 확인</h2>
+        <button type="button" id="closeManualModalBtn" class="modal-close-btn" aria-label="닫기">&times;</button>
+      </div>
+      <p id="manualModalDesc" class="modal-desc">
+        GPS 오차 또는 기기 예외 상황 시 현장 담당자의 확인 코드를 입력해 수동 출석을 승인합니다.
+      </p>
+      <form id="manualVerifyForm" novalidate>
+        <div class="form-group">
+          <label for="manualCodeInput" class="form-label">담당자 확인 코드</label>
+          <input
+            type="password"
+            id="manualCodeInput"
+            class="form-input"
+            inputmode="numeric"
+            placeholder="담당자 확인 코드 입력"
+            autocomplete="off"
+            required
+          />
+          <p id="manualCodeError" class="field-error" role="alert"></p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="cancelManualBtn" class="btn btn--secondary">취소</button>
+          <button type="submit" id="confirmManualBtn" class="btn btn--primary">수동 출석 승인</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <footer class="site-footer" aria-hidden="true"></footer>
 

@@ -572,7 +572,7 @@ textarea {
    ========================================================================== */
 .participant-inline-grid {
   display: grid;
-  grid-template-columns: 1.05fr 1.65fr 0.72fr;
+  grid-template-columns: 1.1fr 1.1fr 0.78fr;
   gap: 10px;
   align-items: end;
 }
@@ -585,10 +585,191 @@ textarea {
   margin-bottom: 5px;
 }
 
-.participant-inline-grid .birth-select-group .form-select {
-  padding: 8px 22px 8px 8px;
-  font-size: 0.88rem;
-  background-position: right 6px center;
+/* Inline Checkbox Option (다회차 / 위치 제한) */
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.86rem;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+  margin-top: 2px;
+}
+
+.checkbox-inline input[type='checkbox'] {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* Location Restriction Config Box (admin.html) */
+.location-box {
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-subtle);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.location-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.coord-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.manager-code-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.manager-code-row .form-input {
+  flex: 1;
+}
+
+.location-status {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  line-height: 1.45;
+  word-break: keep-all;
+}
+
+.location-status.is-success {
+  color: var(--color-success);
+  font-weight: 700;
+}
+
+.location-status.is-error {
+  color: var(--color-danger);
+  font-weight: 700;
+}
+
+/* Manual Override Link Button & Banner (index.html) */
+.manual-trigger-wrap {
+  margin-top: 6px;
+  text-align: center;
+}
+
+.btn-text-link {
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.btn-text-link:hover {
+  color: var(--color-primary);
+  background-color: var(--color-primary-soft);
+}
+
+.manual-mode-banner {
+  padding: 11px 13px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-md);
+  background-color: var(--color-warning-soft);
+  border: 1.5px solid var(--color-warning-border);
+  color: var(--color-warning);
+  font-size: 0.84rem;
+  font-weight: 700;
+  line-height: 1.45;
+  word-break: keep-all;
+}
+
+/* Modal (담당자 수동 출석 확인) */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(15, 23, 42, 0.52);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+}
+
+.modal-dialog {
+  width: 100%;
+  max-width: 400px;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 44px rgba(15, 23, 42, 0.22);
+  padding: 22px 20px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.modal-title {
+  font-size: 1.08rem;
+  color: var(--color-text);
+}
+
+.modal-close-btn {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-close-btn:hover {
+  background-color: var(--color-surface-subtle);
+  color: var(--color-text);
+}
+
+.modal-desc {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin-bottom: 14px;
+  word-break: keep-all;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.modal-actions .btn {
+  flex: 1;
+  min-height: 44px;
+  font-size: 0.92rem;
 }
 
 /* ==========================================================================
@@ -852,7 +1033,7 @@ textarea {
 
 .roster-header-row {
   display: grid;
-  grid-template-columns: minmax(110px, 1.1fr) minmax(215px, 1.85fr) 86px 32px;
+  grid-template-columns: minmax(110px, 1.15fr) minmax(130px, 1.1fr) 86px 32px;
   gap: 8px;
   padding: 0 2px;
   font-size: 0.76rem;
@@ -866,10 +1047,10 @@ textarea {
   gap: 8px;
 }
 
-/* 참가자 1명당 1줄 컴팩트 가로 그리드: 이름 | 생년월일(연/월/일) | 성별(남/여) | 삭제(×) */
+/* 참가자 1명당 1줄 컴팩트 가로 그리드: 이름 | 생년월일(6자리) | 성별(남/여) | 삭제(×) */
 .roster-row {
   display: grid;
-  grid-template-columns: minmax(110px, 1.1fr) minmax(215px, 1.85fr) 86px 32px;
+  grid-template-columns: minmax(110px, 1.15fr) minmax(130px, 1.1fr) 86px 32px;
   gap: 8px;
   align-items: center;
 }
@@ -1185,7 +1366,7 @@ textarea {
     background-position: right 8px center;
   }
 
-  /* 관리자 출석부 행: 좁은 모바일에서 깔끔한 2단 카드형으로 전환 */
+  /* 관리자 출석부 행: 모바일에서도 깔끔한 2단 카드형으로 전환 */
   .roster-header-row {
     display: none;
   }
@@ -1206,7 +1387,7 @@ textarea {
     grid-area: name;
   }
 
-  .roster-row .birth-select-group {
+  .roster-row .roster-birth-input {
     grid-area: birth;
   }
 
@@ -1218,6 +1399,10 @@ textarea {
     grid-area: del;
     align-self: stretch;
     height: auto;
+  }
+
+  .coord-grid {
+    grid-template-columns: 1fr;
   }
 
   .link-box {

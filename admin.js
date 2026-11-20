@@ -26,12 +26,7 @@ const CODE_PREFIX = 'gjyouth-';
 const CODE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const CODE_LENGTH = 6;
 
-const BIRTH_YEAR_MAX = 2012;
-const BIRTH_YEAR_MIN = 1960;
-const BIRTH_YEAR_DEFAULT = 2000;
-const BIRTH_MONTH_DEFAULT = 1;
-const BIRTH_DAY_DEFAULT = 1;
-const DEFAULT_BIRTH_ISO = '2000-01-01';
+const ERROR_MSG_INVALID_BIRTH6 = '올바른 생년월일 6자리(예: 960211)를 입력해주세요.';
 
 const NAME_BLACKLIST = [
   '홍길동',
@@ -54,9 +49,10 @@ let editingProgramCode = null;
 // 유틸리티 함수
 // ============================================================================
 
-function getDaysInMonth(year, month) {
-  if (!year || !month) return 31;
-  return new Date(Number(year), Number(month), 0).getDate();
+function parseBoolFlag(val) {
+  if (typeof val === 'boolean') return val;
+  const s = String(val || '').trim().toUpperCase();
+  return s === 'Y' || s === 'TRUE' || s === '1' || s === 'YES';
 }
 
 function normalizeGender(raw) {
@@ -64,6 +60,61 @@ function normalizeGender(raw) {
   if (val === '남' || val === '남성') return '남';
   if (val === '여' || val === '여성') return '여';
   return '';
+}
+
+/**
+ * 생년월일 6자리(YYMMDD) 검증 및 YYYY-MM-DD 변환
+ * - 60 ~ 99 => 1960 ~ 1999년
+ * - 00 ~ 12 => 2000 ~ 2012년
+ * - 그 외 연도(13 ~ 59) 또는 존재하지 않는 월/일 차단
+ */
+function parseBirthDate6(rawValue) {
+  const digits = String(rawValue || '').replace(/\D/g, '');
+  if (!/^\d{6}$/.test(digits)) {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  const yy = parseInt(digits.slice(0, 2), 10);
+  const mm = parseInt(digits.slice(2, 4), 10);
+  const dd = parseInt(digits.slice(4, 6), 10);
+
+  let fullYear = null;
+  if (yy >= 60 && yy <= 99) {
+    fullYear = 1900 + yy;
+  } else if (yy >= 0 && yy <= 12) {
+    fullYear = 2000 + yy;
+  } else {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  if (mm < 1 || mm > 12) {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  const maxDays = new Date(fullYear, mm, 0).getDate();
+  if (dd < 1 || dd > maxDays) {
+    return { valid: false, message: ERROR_MSG_INVALID_BIRTH6 };
+  }
+
+  const iso = `${fullYear}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  return { valid: true, iso, digits, fullYear };
+}
+
+/**
+ * YYYY-MM-DD -> YYMMDD 6자리 변환 (수정 모드 입력칸 표시용)
+ */
+function formatIsoToBirth6(rawValue) {
+  const str = String(rawValue || '').trim();
+  const m = str.match(/^\d{2}(\d{2})-(\d{2})-(\d{2})$/);
+  if (m) return `${m[1]}${m[2]}${m[3]}`;
+  return str.replace(/\D/g, '').slice(0, 6);
+}
+
+function normalizeBirthDateToIso(rawValue) {
+  const str = String(rawValue || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  const parsed = parseBirthDate6(str);
+  return parsed.valid ? parsed.iso : str;
 }
 
 function sortRosterKorean(list) {
@@ -75,8 +126,7 @@ function sortRosterKorean(list) {
 }
 
 /**
- * 출석부 명단 정규화 (배열 / JSON 문자열 / 구형 데이터 호환 + 한글 가나다순 정렬)
- * @returns {Array<{ name: string, birthDate: string, gender: string }>}
+ * 출석부 명단 정규화 + 한글 가나다순 오름차순 자동 정렬
  */
 function normalizeRosterList(raw) {
   let source = [];
@@ -101,7 +151,7 @@ function normalizeRosterList(raw) {
   source.forEach((entry) => {
     if (!entry || typeof entry !== 'object') return;
     const name = String(entry.name || '').replace(/\s+/g, '');
-    const birthDate = String(entry.birthDate || '').trim();
+    const birthDate = normalizeBirthDateToIso(entry.birthDate || '');
     const gender = normalizeGender(entry.gender);
     if (!name) return;
 
@@ -113,6 +163,23 @@ function normalizeRosterList(raw) {
   });
 
   return sortRosterKorean(result);
+}
+
+function normalizeProgramObject(p) {
+  const roster = normalizeRosterList(p.roster || p.preRegisteredList);
+  const locationEnabled = parseBoolFlag(p.locationEnabled);
+  return {
+    ...p,
+    roster,
+    preRegisteredList: roster,
+    isMultiSession: parseBoolFlag(p.isMultiSession),
+    locationEnabled,
+    locationName: String(p.locationName || '').trim(),
+    latitude: p.latitude !== undefined && p.latitude !== '' ? String(p.latitude).trim() : '',
+    longitude: p.longitude !== undefined && p.longitude !== '' ? String(p.longitude).trim() : '',
+    allowedRadius: Number(p.allowedRadius) || 300,
+    managerCode: String(p.managerCode || '').trim(),
+  };
 }
 
 /**
@@ -145,6 +212,18 @@ function validateKoreanName(rawName) {
 }
 
 /**
+ * 4자리 숫자 담당자 확인 코드 랜덤 생성
+ */
+function generateManagerCode() {
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    const arr = new Uint32Array(1);
+    window.crypto.getRandomValues(arr);
+    return String(1000 + (arr[0] % 9000));
+  }
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+/**
  * 고유 프로그램 코드 생성 (gjyouth- + 6자리 영문 대문자/숫자)
  */
 function generateProgramCode(existingCodes = []) {
@@ -173,9 +252,6 @@ function generateProgramCode(existingCodes = []) {
   return `${CODE_PREFIX}${Date.now().toString(36).toUpperCase().slice(-CODE_LENGTH)}`;
 }
 
-/**
- * 현재 도메인 기준 참가자 출석 등록 전용 URL 생성
- */
 function buildAttendanceUrl(code) {
   const url = new URL('./index.html', window.location.href);
   url.search = '';
@@ -200,9 +276,6 @@ function formatLocalDateTime(dateObj = new Date()) {
   );
 }
 
-/**
- * 클립보드 복사 및 버튼 피드백 처리
- */
 async function copyTextWithFeedback(text, buttonEl) {
   let copied = false;
 
@@ -265,14 +338,7 @@ function getLocalPrograms() {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.map((p) => {
-      const roster = normalizeRosterList(p.roster || p.preRegisteredList);
-      return {
-        ...p,
-        roster,
-        preRegisteredList: roster,
-      };
-    });
+    return parsed.map(normalizeProgramObject);
   } catch (err) {
     return [];
   }
@@ -350,33 +416,33 @@ async function fetchProgramList() {
     throw new Error(result.message || '프로그램 목록을 불러오지 못했습니다.');
   }
 
-  return Array.isArray(result.data)
-    ? result.data.map((p) => {
-        const roster = normalizeRosterList(p.roster || p.preRegisteredList);
-        return {
-          ...p,
-          roster,
-          preRegisteredList: roster,
-        };
-      })
-    : [];
+  return Array.isArray(result.data) ? result.data.map(normalizeProgramObject) : [];
 }
 
 async function saveNewProgram(programData) {
   const sortedRoster = normalizeRosterList(programData.roster);
+  const payloadFields = {
+    code: programData.code,
+    name: programData.name,
+    date: programData.date,
+    time: programData.time,
+    instructor: programData.instructor,
+    roster: sortedRoster,
+    isMultiSession: Boolean(programData.isMultiSession),
+    locationEnabled: Boolean(programData.locationEnabled),
+    locationName: programData.locationEnabled ? String(programData.locationName || '').trim() : '',
+    latitude: programData.locationEnabled ? String(programData.latitude || '').trim() : '',
+    longitude: programData.locationEnabled ? String(programData.longitude || '').trim() : '',
+    allowedRadius: programData.locationEnabled ? Number(programData.allowedRadius) || 300 : '',
+    managerCode: String(programData.managerCode || '').trim(),
+  };
 
   if (IS_TEST_MODE) {
     const list = getLocalPrograms();
-    const record = {
+    const record = normalizeProgramObject({
       createdAt: formatLocalDateTime(),
-      code: programData.code,
-      name: programData.name,
-      date: programData.date,
-      time: programData.time,
-      instructor: programData.instructor,
-      roster: sortedRoster,
-      preRegisteredList: sortedRoster,
-    };
+      ...payloadFields,
+    });
     list.unshift(record);
     saveLocalPrograms(list);
     return record;
@@ -393,12 +459,7 @@ async function saveNewProgram(programData) {
     body: JSON.stringify({
       action: 'createProgram',
       adminPassword: adminSessionPassword,
-      code: programData.code,
-      name: programData.name,
-      date: programData.date,
-      time: programData.time,
-      instructor: programData.instructor,
-      roster: sortedRoster,
+      ...payloadFields,
     }),
   });
 
@@ -411,13 +472,26 @@ async function saveNewProgram(programData) {
     throw new Error(result.message || '프로그램 생성에 실패했습니다.');
   }
 
-  const saved = result.data || {};
-  const roster = normalizeRosterList(saved.roster || saved.preRegisteredList || sortedRoster);
-  return { ...saved, roster, preRegisteredList: roster };
+  return normalizeProgramObject(result.data || payloadFields);
 }
 
 async function updateExistingProgram(programData) {
   const sortedRoster = normalizeRosterList(programData.roster);
+  const payloadFields = {
+    code: programData.code,
+    name: programData.name,
+    date: programData.date,
+    time: programData.time,
+    instructor: programData.instructor,
+    roster: sortedRoster,
+    isMultiSession: Boolean(programData.isMultiSession),
+    locationEnabled: Boolean(programData.locationEnabled),
+    locationName: programData.locationEnabled ? String(programData.locationName || '').trim() : '',
+    latitude: programData.locationEnabled ? String(programData.latitude || '').trim() : '',
+    longitude: programData.locationEnabled ? String(programData.longitude || '').trim() : '',
+    allowedRadius: programData.locationEnabled ? Number(programData.allowedRadius) || 300 : '',
+    managerCode: String(programData.managerCode || '').trim(),
+  };
 
   if (IS_TEST_MODE) {
     const list = getLocalPrograms();
@@ -425,15 +499,10 @@ async function updateExistingProgram(programData) {
     if (idx === -1) {
       throw new Error('수정할 프로그램을 찾을 수 없습니다.');
     }
-    const updated = {
+    const updated = normalizeProgramObject({
       ...list[idx],
-      name: programData.name,
-      date: programData.date,
-      time: programData.time,
-      instructor: programData.instructor,
-      roster: sortedRoster,
-      preRegisteredList: sortedRoster,
-    };
+      ...payloadFields,
+    });
     list[idx] = updated;
     saveLocalPrograms(list);
     return updated;
@@ -450,12 +519,7 @@ async function updateExistingProgram(programData) {
     body: JSON.stringify({
       action: 'updateProgram',
       adminPassword: adminSessionPassword,
-      code: programData.code,
-      name: programData.name,
-      date: programData.date,
-      time: programData.time,
-      instructor: programData.instructor,
-      roster: sortedRoster,
+      ...payloadFields,
     }),
   });
 
@@ -468,9 +532,7 @@ async function updateExistingProgram(programData) {
     throw new Error(result.message || '프로그램 수정에 실패했습니다.');
   }
 
-  const saved = result.data || {};
-  const roster = normalizeRosterList(saved.roster || saved.preRegisteredList || sortedRoster);
-  return { ...saved, roster, preRegisteredList: roster };
+  return normalizeProgramObject(result.data || payloadFields);
 }
 
 async function deleteProgramByCode(code) {
@@ -545,10 +607,23 @@ document.addEventListener('DOMContentLoaded', () => {
   const createProgramForm = document.getElementById('createProgramForm');
   const inputProgramName = document.getElementById('inputProgramName');
   const inputProgramDate = document.getElementById('inputProgramDate');
+  const inputIsMultiSession = document.getElementById('inputIsMultiSession');
   const inputProgramTime = document.getElementById('inputProgramTime');
   const inputInstructor = document.getElementById('inputInstructor');
   const createAlert = document.getElementById('createAlert');
   const createProgramBtn = document.getElementById('createProgramBtn');
+
+  // 위치 기반 제한 설정 요소
+  const inputLocationEnabled = document.getElementById('inputLocationEnabled');
+  const locationFieldsWrap = document.getElementById('locationFieldsWrap');
+  const inputLocationName = document.getElementById('inputLocationName');
+  const inputLatitude = document.getElementById('inputLatitude');
+  const inputLongitude = document.getElementById('inputLongitude');
+  const fetchMyLocationBtn = document.getElementById('fetchMyLocationBtn');
+  const locationFetchStatus = document.getElementById('locationFetchStatus');
+  const inputAllowedRadius = document.getElementById('inputAllowedRadius');
+  const inputManagerCode = document.getElementById('inputManagerCode');
+  const regenManagerCodeBtn = document.getElementById('regenManagerCodeBtn');
 
   // 출석부 명단 행 리스트 요소
   const rosterCountPill = document.getElementById('rosterCountPill');
@@ -563,6 +638,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const resultDateTime = document.getElementById('resultDateTime');
   const resultInstructor = document.getElementById('resultInstructor');
   const resultRosterCount = document.getElementById('resultRosterCount');
+  const resultLocationRow = document.getElementById('resultLocationRow');
+  const resultLocationText = document.getElementById('resultLocationText');
+  const resultManagerCodeRow = document.getElementById('resultManagerCodeRow');
+  const resultManagerCodeText = document.getElementById('resultManagerCodeText');
   const resultUrlInput = document.getElementById('resultUrlInput');
   const copyResultUrlBtn = document.getElementById('copyResultUrlBtn');
   const openResultUrlLink = document.getElementById('openResultUrlLink');
@@ -573,11 +652,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const programListError = document.getElementById('programListError');
   const programListContainer = document.getElementById('programListContainer');
 
-  // 기본 일자: 오늘 날짜
+  // 기본 일자: 오늘 날짜 & 기본 담당자 확인 코드 자동 생성
   inputProgramDate.value = getTodayIsoLocal();
+  inputManagerCode.value = generateManagerCode();
 
   // --------------------------------------------------------------------------
-  // 1. 알림 헬퍼
+  // 1. 알림 및 위치 설정 UI 헬퍼
   // --------------------------------------------------------------------------
   function showCreateAlert(message) {
     createAlert.textContent = message;
@@ -589,22 +669,72 @@ document.addEventListener('DOMContentLoaded', () => {
     createAlert.classList.add('hidden');
   }
 
-  // --------------------------------------------------------------------------
-  // 2. 출석부 1줄 가로 그리드 행 생성 / 삭제 / 갱신
-  // --------------------------------------------------------------------------
-  function populateDaySelect(daySelect, year, month, preferredDay) {
-    const maxDays = getDaysInMonth(year, month);
-    const targetDay = Math.min(Number(preferredDay) || 1, maxDays);
-    daySelect.innerHTML = '';
-    for (let d = 1; d <= maxDays; d++) {
-      const opt = document.createElement('option');
-      opt.value = String(d).padStart(2, '0');
-      opt.textContent = `${d}일`;
-      if (d === targetDay) opt.selected = true;
-      daySelect.appendChild(opt);
+  function setLocationStatus(message, type = '') {
+    locationFetchStatus.textContent = message;
+    locationFetchStatus.classList.remove('is-success', 'is-error');
+    if (type === 'success') locationFetchStatus.classList.add('is-success');
+    if (type === 'error') locationFetchStatus.classList.add('is-error');
+  }
+
+  function syncLocationFieldsVisibility() {
+    if (inputLocationEnabled.checked) {
+      locationFieldsWrap.classList.remove('hidden');
+    } else {
+      locationFieldsWrap.classList.add('hidden');
+      setLocationStatus('');
     }
   }
 
+  inputLocationEnabled.addEventListener('change', () => {
+    syncLocationFieldsVisibility();
+    hideCreateAlert();
+  });
+
+  regenManagerCodeBtn.addEventListener('click', () => {
+    inputManagerCode.value = generateManagerCode();
+    hideCreateAlert();
+  });
+
+  fetchMyLocationBtn.addEventListener('click', () => {
+    hideCreateAlert();
+    if (!navigator.geolocation) {
+      setLocationStatus('이 브라우저에서는 위치 정보 조회(GPS)를 지원하지 않습니다.', 'error');
+      return;
+    }
+
+    fetchMyLocationBtn.disabled = true;
+    fetchMyLocationBtn.textContent = '위치 불러오는 중...';
+    setLocationStatus('현재 위치 좌표를 확인하는 중입니다...');
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = Number(pos.coords.latitude).toFixed(6);
+        const lng = Number(pos.coords.longitude).toFixed(6);
+        inputLatitude.value = lat;
+        inputLongitude.value = lng;
+        const acc = Math.round(pos.coords.accuracy || 0);
+        setLocationStatus(
+          `현재 좌표가 입력되었습니다. (위도 ${lat}, 경도 ${lng}${acc ? ` · 오차 약 ${acc}m` : ''})`,
+          'success'
+        );
+        fetchMyLocationBtn.disabled = false;
+        fetchMyLocationBtn.textContent = '현재 내 위치 좌표 불러오기';
+      },
+      () => {
+        setLocationStatus(
+          '위치 정보를 불러올 수 없습니다. 브라우저의 위치 권한을 허용하거나 좌표를 직접 입력해주세요.',
+          'error'
+        );
+        fetchMyLocationBtn.disabled = false;
+        fetchMyLocationBtn.textContent = '현재 내 위치 좌표 불러오기';
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    );
+  });
+
+  // --------------------------------------------------------------------------
+  // 2. 출석부 1줄 가로 그리드 행 생성 / 삭제 / 갱신 (이름 | 생년월일 6자리 | 성별 | ×)
+  // --------------------------------------------------------------------------
   function updateRosterSummaryUI() {
     const rows = Array.from(rosterRowsContainer.querySelectorAll('.roster-row'));
 
@@ -623,7 +753,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    // 이름 입력된 행 수 계산
     let filledCount = 0;
     rows.forEach((row) => {
       const nameVal = row.querySelector('.roster-name-input').value.replace(/\s+/g, '');
@@ -643,7 +772,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const row = document.createElement('div');
     row.className = 'roster-row';
     row.dataset.gender = '';
-    row.dataset.birthTouched = 'false';
 
     // ① 이름 입력칸
     const nameInput = document.createElement('input');
@@ -656,67 +784,28 @@ document.addEventListener('DOMContentLoaded', () => {
       nameInput.value = initialData.name;
     }
 
-    // ② 생년월일 3개 셀렉트 ([연도][월][일], 여백 없이 촘촘히 배치, 기본값 2000-01-01)
-    const birthGroup = document.createElement('div');
-    birthGroup.className = 'birth-select-group';
-
-    let initYear = BIRTH_YEAR_DEFAULT;
-    let initMonth = BIRTH_MONTH_DEFAULT;
-    let initDay = BIRTH_DAY_DEFAULT;
-
+    // ② 생년월일 6자리 숫자 직접 입력칸
+    const birthInput = document.createElement('input');
+    birthInput.type = 'text';
+    birthInput.className = 'form-input roster-birth-input';
+    birthInput.setAttribute('inputmode', 'numeric');
+    birthInput.setAttribute('pattern', '[0-9]*');
+    birthInput.maxLength = 6;
+    birthInput.placeholder = '예: 960211';
+    birthInput.setAttribute('autocomplete', 'off');
+    birthInput.setAttribute('aria-label', '생년월일 6자리');
     if (initialData && initialData.birthDate) {
-      const m = String(initialData.birthDate).match(/^(\d{4})-(\d{2})-(\d{2})$/);
-      if (m) {
-        initYear = Number(m[1]);
-        initMonth = Number(m[2]);
-        initDay = Number(m[3]);
-        row.dataset.birthTouched = 'true';
+      birthInput.value = formatIsoToBirth6(initialData.birthDate);
+    }
+
+    birthInput.addEventListener('input', () => {
+      const digitsOnly = birthInput.value.replace(/\D/g, '').slice(0, 6);
+      if (birthInput.value !== digitsOnly) {
+        birthInput.value = digitsOnly;
       }
-    }
-
-    const yearSelect = document.createElement('select');
-    yearSelect.className = 'form-select roster-birth-year';
-    yearSelect.setAttribute('aria-label', '출생 연도');
-    for (let y = BIRTH_YEAR_MAX; y >= BIRTH_YEAR_MIN; y--) {
-      const opt = document.createElement('option');
-      opt.value = String(y);
-      opt.textContent = `${y}년`;
-      if (y === initYear) opt.selected = true;
-      yearSelect.appendChild(opt);
-    }
-
-    const monthSelect = document.createElement('select');
-    monthSelect.className = 'form-select roster-birth-month';
-    monthSelect.setAttribute('aria-label', '출생 월');
-    for (let m = 1; m <= 12; m++) {
-      const opt = document.createElement('option');
-      opt.value = String(m).padStart(2, '0');
-      opt.textContent = `${m}월`;
-      if (m === initMonth) opt.selected = true;
-      monthSelect.appendChild(opt);
-    }
-
-    const daySelect = document.createElement('select');
-    daySelect.className = 'form-select roster-birth-day';
-    daySelect.setAttribute('aria-label', '출생 일');
-    populateDaySelect(daySelect, initYear, initMonth, initDay);
-
-    const handleBirthChange = () => {
-      row.dataset.birthTouched = 'true';
-      populateDaySelect(daySelect, Number(yearSelect.value), Number(monthSelect.value), Number(daySelect.value));
-      hideCreateAlert();
-    };
-
-    yearSelect.addEventListener('change', handleBirthChange);
-    monthSelect.addEventListener('change', handleBirthChange);
-    daySelect.addEventListener('change', () => {
-      row.dataset.birthTouched = 'true';
+      birthInput.classList.remove('is-invalid');
       hideCreateAlert();
     });
-
-    birthGroup.appendChild(yearSelect);
-    birthGroup.appendChild(monthSelect);
-    birthGroup.appendChild(daySelect);
 
     // ③ 성별 토글 버튼 ([남] [여] 미니 세그먼트 버튼)
     const genderSegment = document.createElement('div');
@@ -777,7 +866,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     row.appendChild(nameInput);
-    row.appendChild(birthGroup);
+    row.appendChild(birthInput);
     row.appendChild(genderSegment);
     row.appendChild(deleteBtn);
 
@@ -812,9 +901,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const validEntries = [];
     const seenPersonKeys = new Set();
 
-    // 기존 invalid 스타일 초기화
     rows.forEach((row) => {
       row.querySelector('.roster-name-input').classList.remove('is-invalid');
+      row.querySelector('.roster-birth-input').classList.remove('is-invalid');
       row.querySelector('.gender-segment').classList.remove('is-invalid');
     });
 
@@ -822,23 +911,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const row = rows[i];
       const rowNum = i + 1;
       const nameInput = row.querySelector('.roster-name-input');
-      const yearSelect = row.querySelector('.roster-birth-year');
-      const monthSelect = row.querySelector('.roster-birth-month');
-      const daySelect = row.querySelector('.roster-birth-day');
+      const birthInput = row.querySelector('.roster-birth-input');
       const genderSegment = row.querySelector('.gender-segment');
 
-      const rawName = nameInput.value;
-      const cleanedName = rawName.replace(/\s+/g, '');
-      const birthDate = `${yearSelect.value}-${monthSelect.value}-${daySelect.value}`;
+      const cleanedName = nameInput.value.replace(/\s+/g, '');
+      const rawBirth = birthInput.value.replace(/\D/g, '');
       const gender = row.dataset.gender || '';
-      const birthChanged = row.dataset.birthTouched === 'true' && birthDate !== DEFAULT_BIRTH_ISO;
 
       // 완전히 비어있는 행은 무시
-      if (!cleanedName && !gender && !birthChanged) {
+      if (!cleanedName && !rawBirth && !gender) {
         continue;
       }
 
-      // 일부만 입력된 행 (이름이 비었는데 성별이나 생년월일을 건드린 경우) 경고
+      // 이름 누락 경고
       if (!cleanedName) {
         nameInput.classList.add('is-invalid');
         nameInput.focus();
@@ -848,7 +933,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
       }
 
-      // 이름 유효성 검증 (한글 완성형 2~5자, 3회 연속 반복 금지, 블랙리스트 차단)
+      // 이름 검증
       const nameCheck = validateKoreanName(cleanedName);
       if (!nameCheck.valid) {
         nameInput.classList.add('is-invalid');
@@ -856,6 +941,17 @@ document.addEventListener('DOMContentLoaded', () => {
         return {
           valid: false,
           message: `출석부 ${rowNum}번째 행: ${nameCheck.message}`,
+        };
+      }
+
+      // 생년월일 6자리 검증 및 YYYY-MM-DD 변환
+      const birthCheck = parseBirthDate6(rawBirth);
+      if (!birthCheck.valid) {
+        birthInput.classList.add('is-invalid');
+        birthInput.focus();
+        return {
+          valid: false,
+          message: `출석부 ${rowNum}번째 행(${nameCheck.cleanedName}): ${birthCheck.message}`,
         };
       }
 
@@ -871,25 +967,24 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // 중복 입력 차단 (이름 + 생년월일 기준)
-      const personKey = `${nameCheck.cleanedName}|${birthDate}`;
+      const personKey = `${nameCheck.cleanedName}|${birthCheck.iso}`;
       if (seenPersonKeys.has(personKey)) {
         nameInput.classList.add('is-invalid');
         nameInput.focus();
         return {
           valid: false,
-          message: `출석부 ${rowNum}번째 행(${nameCheck.cleanedName}, ${birthDate})이 중복 입력되었습니다.`,
+          message: `출석부 ${rowNum}번째 행(${nameCheck.cleanedName}, ${birthCheck.iso})이 중복 입력되었습니다.`,
         };
       }
 
       seenPersonKeys.add(personKey);
       validEntries.push({
         name: nameCheck.cleanedName,
-        birthDate,
+        birthDate: birthCheck.iso,
         gender,
       });
     }
 
-    // 이름 기준 한글 가나다순 오름차순 자동 정렬
     const sorted = sortRosterKorean(validEntries);
     return { valid: true, roster: sorted };
   }
@@ -911,6 +1006,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     createProgramForm.reset();
     inputProgramDate.value = getTodayIsoLocal();
+    inputIsMultiSession.checked = false;
+    inputLocationEnabled.checked = false;
+    inputAllowedRadius.value = '300';
+    inputManagerCode.value = generateManagerCode();
+    syncLocationFieldsVisibility();
     resetRosterRows();
     hideCreateAlert();
   }
@@ -927,8 +1027,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     inputProgramName.value = program.name || '';
     inputProgramDate.value = program.date || getTodayIsoLocal();
+    inputIsMultiSession.checked = Boolean(program.isMultiSession);
     inputProgramTime.value = program.time || '';
     inputInstructor.value = program.instructor || '';
+
+    inputLocationEnabled.checked = Boolean(program.locationEnabled);
+    inputLocationName.value = program.locationName || '';
+    inputLatitude.value = program.latitude || '';
+    inputLongitude.value = program.longitude || '';
+    inputAllowedRadius.value = String(program.allowedRadius || 300);
+    inputManagerCode.value = program.managerCode || '';
+    syncLocationFieldsVisibility();
+    setLocationStatus('');
+
     resetRosterRows(normalizeRosterList(program.roster || program.preRegisteredList));
     hideCreateAlert();
 
@@ -1003,12 +1114,29 @@ document.addEventListener('DOMContentLoaded', () => {
       : '프로그램이 생성되었습니다';
     resultCodeBadge.textContent = program.code;
     resultProgramName.textContent = program.name;
-    resultDateTime.textContent = `${program.date} · ${program.time}`;
+    resultDateTime.textContent =
+      `${program.date} · ${program.time}` +
+      (program.isMultiSession ? ' (다회차 · 날짜 제한 해제)' : '');
     resultInstructor.textContent = program.instructor;
     resultRosterCount.textContent =
       roster.length > 0
         ? `출석부 ${roster.length}명 (가나다순 정렬 완료)`
         : '현장 등록 모드 (0명 / 인원 제한 없음)';
+
+    if (program.locationEnabled) {
+      const placeLabel = program.locationName ? `${program.locationName} · ` : '';
+      resultLocationText.textContent = `${placeLabel}반경 ${program.allowedRadius}m 이내`;
+      resultLocationRow.classList.remove('hidden');
+    } else {
+      resultLocationRow.classList.add('hidden');
+    }
+
+    if (program.managerCode) {
+      resultManagerCodeText.textContent = program.managerCode;
+      resultManagerCodeRow.classList.remove('hidden');
+    } else {
+      resultManagerCodeRow.classList.add('hidden');
+    }
 
     resultUrlInput.value = attendanceUrl;
     openResultUrlLink.href = attendanceUrl;
@@ -1031,6 +1159,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const name = inputProgramName.value.trim();
     const date = inputProgramDate.value.trim();
+    const isMultiSession = Boolean(inputIsMultiSession.checked);
     const time = inputProgramTime.value.trim();
     const instructor = inputInstructor.value.trim();
 
@@ -1055,6 +1184,40 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    // 위치 기반 출석 제한 설정 검증
+    const locationEnabled = Boolean(inputLocationEnabled.checked);
+    let locationName = '';
+    let latitude = '';
+    let longitude = '';
+    let allowedRadius = 300;
+    const managerCode = inputManagerCode.value.trim();
+
+    if (locationEnabled) {
+      locationName = inputLocationName.value.trim();
+      latitude = inputLatitude.value.trim();
+      longitude = inputLongitude.value.trim();
+      allowedRadius = Number(inputAllowedRadius.value) || 300;
+
+      const latNum = Number(latitude);
+      const lngNum = Number(longitude);
+      if (!latitude || isNaN(latNum) || latNum < -90 || latNum > 90) {
+        showCreateAlert('올바른 기준 위도(Latitude, -90 ~ 90)를 입력하거나 현재 위치를 불러와주세요.');
+        inputLatitude.focus();
+        return;
+      }
+      if (!longitude || isNaN(lngNum) || lngNum < -180 || lngNum > 180) {
+        showCreateAlert('올바른 기준 경도(Longitude, -180 ~ 180)를 입력하거나 현재 위치를 불러와주세요.');
+        inputLongitude.focus();
+        return;
+      }
+    }
+
+    if (!managerCode) {
+      showCreateAlert('현장 수동 출석 승인용 담당자 확인 코드를 입력해주세요.');
+      inputManagerCode.focus();
+      return;
+    }
+
     const rosterValidation = collectAndValidateRosterRows();
     if (!rosterValidation.valid) {
       showCreateAlert(rosterValidation.message);
@@ -1070,23 +1233,25 @@ document.addEventListener('DOMContentLoaded', () => {
     createProgramBtn.textContent = isEditing ? '수정 저장 중...' : '프로그램 저장 중...';
 
     try {
+      const payload = {
+        code: targetCode,
+        name,
+        date,
+        time,
+        instructor,
+        roster: rosterValidation.roster,
+        isMultiSession,
+        locationEnabled,
+        locationName,
+        latitude,
+        longitude,
+        allowedRadius,
+        managerCode,
+      };
+
       const savedProgram = isEditing
-        ? await updateExistingProgram({
-            code: targetCode,
-            name,
-            date,
-            time,
-            instructor,
-            roster: rosterValidation.roster,
-          })
-        : await saveNewProgram({
-            code: targetCode,
-            name,
-            date,
-            time,
-            instructor,
-            roster: rosterValidation.roster,
-          });
+        ? await updateExistingProgram(payload)
+        : await saveNewProgram(payload);
 
       showResultCard(savedProgram, isEditing);
       resetFormToCreateMode();
@@ -1136,6 +1301,21 @@ document.addEventListener('DOMContentLoaded', () => {
       const codeBadge = document.createElement('span');
       codeBadge.className = 'badge badge--code';
       codeBadge.textContent = program.code;
+      badges.appendChild(codeBadge);
+
+      if (program.isMultiSession) {
+        const multiBadge = document.createElement('span');
+        multiBadge.className = 'badge badge--test';
+        multiBadge.textContent = '다회차';
+        badges.appendChild(multiBadge);
+      }
+
+      if (program.locationEnabled) {
+        const locBadge = document.createElement('span');
+        locBadge.className = 'badge badge--primary';
+        locBadge.textContent = `GPS ${program.allowedRadius}m`;
+        badges.appendChild(locBadge);
+      }
 
       const modeBadge = document.createElement('span');
       if (roster.length > 0) {
@@ -1145,24 +1325,35 @@ document.addEventListener('DOMContentLoaded', () => {
         modeBadge.className = 'badge badge--open';
         modeBadge.textContent = '현장 등록';
       }
-
-      badges.appendChild(codeBadge);
       badges.appendChild(modeBadge);
+
       top.appendChild(nameEl);
       top.appendChild(badges);
 
-      // 메타: 일시, 강사명, 생성일시
+      // 메타: 일시, 강사명, 위치/담당자코드, 생성일시
       const meta = document.createElement('div');
       meta.className = 'program-item-meta';
 
       const dateSpan = document.createElement('span');
       dateSpan.textContent = `일시: ${program.date} ${program.time}`;
+      meta.appendChild(dateSpan);
 
       const instructorSpan = document.createElement('span');
       instructorSpan.textContent = `강사: ${program.instructor}`;
-
-      meta.appendChild(dateSpan);
       meta.appendChild(instructorSpan);
+
+      if (program.locationEnabled) {
+        const locSpan = document.createElement('span');
+        const placeText = program.locationName ? `${program.locationName} ` : '';
+        locSpan.textContent = `위치: ${placeText}(반경 ${program.allowedRadius}m)`;
+        meta.appendChild(locSpan);
+      }
+
+      if (program.managerCode) {
+        const codeSpan = document.createElement('span');
+        codeSpan.textContent = `확인코드: ${program.managerCode}`;
+        meta.appendChild(codeSpan);
+      }
 
       if (program.createdAt) {
         const createdSpan = document.createElement('span');

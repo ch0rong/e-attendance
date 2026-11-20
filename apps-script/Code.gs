@@ -3,8 +3,8 @@
  * Google Apps Script 백엔드 (apps-script/Code.gs)
  *
  * [시트 구성]
- * 1. 프로그램목록: 생성일시 | 프로그램코드 | 프로그램명 | 프로그램일자 | 프로그램시간 | 강사명 | 출석부명단
- * 2. 참가자명단:   등록날짜 | 등록시간 | 프로그램코드 | 프로그램명 | 출석일자 | 참가자명 | 생년월일 | 연령구분 | 성별 | 개인정보동의 | 기기ID
+ * 1. 프로그램목록: 생성일시 | 프로그램코드 | 프로그램명 | 프로그램일자 | 프로그램시간 | 강사명 | 출석부명단 | 다회차여부 | 위치제한여부 | 장소명 | 위도 | 경도 | 허용반경 | 담당자확인코드
+ * 2. 참가자명단:   등록날짜 | 등록시간 | 프로그램코드 | 프로그램명 | 출석일자 | 참가자명 | 생년월일 | 연령구분 | 성별 | 개인정보동의 | 기기ID | 비고
  */
 
 const SHEET_PROGRAMS = '프로그램목록';
@@ -18,6 +18,13 @@ const PROGRAM_HEADERS = [
   '프로그램시간',
   '강사명',
   '출석부명단',
+  '다회차여부',
+  '위치제한여부',
+  '장소명',
+  '위도',
+  '경도',
+  '허용반경',
+  '담당자확인코드',
 ];
 
 const PARTICIPANT_HEADERS = [
@@ -32,6 +39,7 @@ const PARTICIPANT_HEADERS = [
   '성별',
   '개인정보동의',
   '기기ID',
+  '비고',
 ];
 
 const TIMEZONE = 'Asia/Seoul';
@@ -41,6 +49,9 @@ const DEFAULT_ADMIN_PASSWORD = '1234';
 const ERROR_MSG_NOT_IN_ROSTER = '출석부에 등록되어있지 않은 정보입니다.';
 const ERROR_MSG_DEVICE_DUPLICATE = '이미 이 기기에서 출석 등록이 완료되었습니다.';
 const ERROR_MSG_PARTICIPANT_DUPLICATE = '이미 출석 처리가 완료된 참가자입니다.';
+const ERROR_MSG_GPS_FAILED = '위치 정보를 확인할 수 없습니다. 스마트폰의 위치(GPS) 권한을 허용해주세요.';
+const ERROR_MSG_INVALID_MANAGER_CODE = '담당자 확인 코드가 일치하지 않습니다.';
+const MANUAL_CONFIRM_NOTE = '담당자 수동확인';
 
 /**
  * 관리자 비밀번호 검증
@@ -102,7 +113,7 @@ function doGet(e) {
 /**
  * POST 요청 처리 (LockService로 동시 접속 충돌 방지)
  * - verifyAdmin / listPrograms / createProgram / updateProgram / deleteProgram
- * - registerParticipant
+ * - verifyManagerCode / registerParticipant
  */
 function doPost(e) {
   const lock = LockService.getScriptLock();
@@ -154,6 +165,10 @@ function doPost(e) {
       }
     }
 
+    if (action === 'verifyManagerCode') {
+      return handleVerifyManagerCode(payload);
+    }
+
     if (action === 'registerParticipant') {
       return handleRegisterParticipant(payload);
     }
@@ -177,7 +192,7 @@ function doPost(e) {
 }
 
 /**
- * 시트 조회 또는 자동 생성 (1행 헤더 보정 포함)
+ * 시트 조회 또는 자동 생성 (기존 시트에 누락된 우측 헤더 열 자동 보완 포함)
  */
 function getOrCreateSheet(sheetName, headers) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -197,7 +212,6 @@ function getOrCreateSheet(sheetName, headers) {
     headerRange.setBackground('#f1f5f9');
     sheet.setFrozenRows(1);
   } else if (sheet.getLastColumn() < headers.length) {
-    // 기존 시트에 누락된 우측 헤더 열(예: 기기ID) 자동 보완
     const existingColCount = sheet.getLastColumn();
     const missingHeaders = headers.slice(existingColCount);
     const missingRange = sheet.getRange(1, existingColCount + 1, 1, missingHeaders.length);
@@ -210,6 +224,19 @@ function getOrCreateSheet(sheetName, headers) {
 }
 
 /**
+ * 불리언 플래그 파싱 ('Y' / 'TRUE' / true -> true)
+ */
+function parseBoolFlag(val) {
+  if (val === true) return true;
+  const s = String(val || '').trim().toUpperCase();
+  return s === 'Y' || s === 'TRUE' || s === '1' || s === 'YES';
+}
+
+function toSheetFlag(val) {
+  return parseBoolFlag(val) ? 'Y' : 'N';
+}
+
+/**
  * 성별 문자열 정규화 ('남성' -> '남', '여성' -> '여')
  */
 function normalizeGender(raw) {
@@ -217,6 +244,53 @@ function normalizeGender(raw) {
   if (val === '남' || val === '남성') return '남';
   if (val === '여' || val === '여성') return '여';
   return val;
+}
+
+/**
+ * 생년월일 정규화 (YYMMDD 6자리 또는 YYYY-MM-DD -> YYYY-MM-DD)
+ * - 60~99 => 1960~1999, 00~12 => 2000~2012
+ */
+function normalizeBirthDate(raw) {
+  const str = String(raw || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return str;
+  }
+  const digits = str.replace(/\D/g, '');
+  if (/^\d{6}$/.test(digits)) {
+    var yy = parseInt(digits.slice(0, 2), 10);
+    var mm = digits.slice(2, 4);
+    var dd = digits.slice(4, 6);
+    var fullYear = null;
+    if (yy >= 60 && yy <= 99) {
+      fullYear = 1900 + yy;
+    } else if (yy >= 0 && yy <= 12) {
+      fullYear = 2000 + yy;
+    }
+    if (fullYear !== null) {
+      return fullYear + '-' + mm + '-' + dd;
+    }
+  }
+  return str;
+}
+
+/**
+ * 하버사인(Haversine) 직선거리(m) 계산
+ */
+function calculateHaversineDistanceMeters(lat1, lon1, lat2, lon2) {
+  var R = 6371000;
+  var toRad = function (deg) {
+    return (deg * Math.PI) / 180;
+  };
+  var dLat = toRad(lat2 - lat1);
+  var dLon = toRad(lon2 - lon1);
+  var a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
 /**
@@ -246,7 +320,7 @@ function parseRosterList(raw) {
     if (!entry || typeof entry !== 'object') continue;
 
     var name = String(entry.name || '').replace(/\s+/g, '');
-    var birthDate = String(entry.birthDate || '').trim();
+    var birthDate = normalizeBirthDate(entry.birthDate || '');
     var gender = normalizeGender(entry.gender);
     if (!name) continue;
 
@@ -261,7 +335,6 @@ function parseRosterList(raw) {
     }
   }
 
-  // 이름 기준 한글 가나다순 오름차순 자동 정렬
   result.sort(function (a, b) {
     var nameDiff = a.name.localeCompare(b.name, 'ko-KR');
     if (nameDiff !== 0) return nameDiff;
@@ -315,10 +388,18 @@ function isSameDeviceRecord(cellValue, deviceId, deviceFingerprint) {
 }
 
 /**
- * 시트 행 데이터를 프로그램 객체로 변환
+ * 시트 행 데이터를 프로그램 객체로 변환 (14열)
  */
 function rowToProgramObject(row) {
   const roster = parseRosterList(row[6]);
+  const isMultiSession = parseBoolFlag(row[7]);
+  const locationEnabled = parseBoolFlag(row[8]);
+  const locationName = String(row[9] || '').trim();
+  const latitude = String(row[10] || '').trim();
+  const longitude = String(row[11] || '').trim();
+  const allowedRadius = Number(row[12]) || 300;
+  const managerCode = String(row[13] || '').trim();
+
   return {
     createdAt: String(row[0] || '').trim(),
     code: String(row[1] || '').trim(),
@@ -328,6 +409,13 @@ function rowToProgramObject(row) {
     instructor: String(row[5] || '').trim(),
     roster: roster,
     preRegisteredList: roster,
+    isMultiSession: isMultiSession,
+    locationEnabled: locationEnabled,
+    locationName: locationName,
+    latitude: latitude,
+    longitude: longitude,
+    allowedRadius: allowedRadius,
+    managerCode: managerCode,
   };
 }
 
@@ -360,8 +448,7 @@ function hasDeviceAlreadySubmitted(programCode, attendanceDate, deviceId, device
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
 
-  const colCount = Math.max(sheet.getLastColumn(), PARTICIPANT_HEADERS.length);
-  const rows = sheet.getRange(2, 1, lastRow - 1, colCount).getDisplayValues();
+  const rows = sheet.getRange(2, 1, lastRow - 1, PARTICIPANT_HEADERS.length).getDisplayValues();
 
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i];
@@ -380,8 +467,7 @@ function hasDeviceAlreadySubmitted(programCode, attendanceDate, deviceId, device
 
 /**
  * GET: 특정 프로그램 기본 정보 반환
- * - 개인정보 보호를 위해 출석부 원본 명단은 브라우저에 노출하지 않고 서버 등록 시 대조
- * - 기기ID/보조지문이 전달되면 동일 기기 기출석 여부를 함께 반환
+ * - 개인정보/보안 보호를 위해 출석부 원본 명단과 담당자확인코드 원문은 브라우저로 노출하지 않음
  */
 function handleGetProgram(code, deviceId, deviceFingerprint, attendanceDate) {
   const program = findProgramByCode(code);
@@ -410,8 +496,63 @@ function handleGetProgram(code, deviceId, deviceFingerprint, attendanceDate) {
       time: program.time,
       instructor: program.instructor,
       rosterCount: program.roster.length,
+      isMultiSession: program.isMultiSession,
+      locationEnabled: program.locationEnabled,
+      locationName: program.locationName,
+      latitude: program.latitude,
+      longitude: program.longitude,
+      allowedRadius: program.allowedRadius,
+      hasManagerCode: Boolean(program.managerCode),
       alreadySubmittedOnDevice: alreadySubmittedOnDevice,
     },
+  });
+}
+
+/**
+ * 프로그램별 담당자 확인 코드 검증 (기존 미설정 프로그램은 관리자 비밀번호를 폴백으로 허용)
+ */
+function isValidProgramManagerCode(program, providedCode) {
+  const input = String(providedCode || '').trim();
+  if (!input) return false;
+  const expected =
+    String((program && program.managerCode) || '').trim() ||
+    PropertiesService.getScriptProperties().getProperty(ADMIN_PASSWORD_PROPERTY_KEY) ||
+    DEFAULT_ADMIN_PASSWORD;
+  return input === expected;
+}
+
+/**
+ * POST: 담당자 확인 코드 검증 (수동 출석 모달 사전 확인용)
+ */
+function handleVerifyManagerCode(payload) {
+  const programCode = String(payload.programCode || '').trim();
+  const managerCode = String(payload.managerCode || '').trim();
+
+  if (!programCode || !managerCode) {
+    return createJsonResponse({
+      status: 'invalid_manager_code',
+      message: ERROR_MSG_INVALID_MANAGER_CODE,
+    });
+  }
+
+  const program = findProgramByCode(programCode);
+  if (!program) {
+    return createJsonResponse({
+      status: 'not_found',
+      message: '유효하지 않은 프로그램입니다.',
+    });
+  }
+
+  if (!isValidProgramManagerCode(program, managerCode)) {
+    return createJsonResponse({
+      status: 'invalid_manager_code',
+      message: ERROR_MSG_INVALID_MANAGER_CODE,
+    });
+  }
+
+  return createJsonResponse({
+    status: 'success',
+    message: '담당자 확인 코드가 확인되었습니다.',
   });
 }
 
@@ -444,7 +585,7 @@ function handleListPrograms() {
 }
 
 /**
- * POST(관리자): 신규 프로그램 및 출석부 저장
+ * POST(관리자): 신규 프로그램 및 출석부·위치·다회차 설정 저장
  */
 function handleCreateProgram(payload) {
   const code = String(payload.code || '').trim();
@@ -453,6 +594,13 @@ function handleCreateProgram(payload) {
   const time = String(payload.time || '').trim();
   const instructor = String(payload.instructor || '').trim();
   const roster = parseRosterList(payload.roster || payload.preRegisteredList);
+  const isMultiSession = parseBoolFlag(payload.isMultiSession);
+  const locationEnabled = parseBoolFlag(payload.locationEnabled);
+  const locationName = locationEnabled ? String(payload.locationName || '').trim() : '';
+  const latitude = locationEnabled ? String(payload.latitude || '').trim() : '';
+  const longitude = locationEnabled ? String(payload.longitude || '').trim() : '';
+  const allowedRadius = locationEnabled ? Number(payload.allowedRadius) || 300 : '';
+  const managerCode = String(payload.managerCode || '').trim();
 
   if (!code || !name || !date || !time || !instructor) {
     return createJsonResponse({
@@ -480,6 +628,13 @@ function handleCreateProgram(payload) {
     time,
     instructor,
     rosterSerialized,
+    toSheetFlag(isMultiSession),
+    toSheetFlag(locationEnabled),
+    locationName,
+    latitude,
+    longitude,
+    allowedRadius === '' ? '' : String(allowedRadius),
+    managerCode,
   ];
 
   const nextRow = sheet.getLastRow() + 1;
@@ -490,16 +645,7 @@ function handleCreateProgram(payload) {
   return createJsonResponse({
     status: 'success',
     message: '프로그램이 생성되었습니다.',
-    data: {
-      createdAt: createdAt,
-      code: code,
-      name: name,
-      date: date,
-      time: time,
-      instructor: instructor,
-      roster: roster,
-      preRegisteredList: roster,
-    },
+    data: rowToProgramObject(newRow),
   });
 }
 
@@ -513,6 +659,13 @@ function handleUpdateProgram(payload) {
   const time = String(payload.time || '').trim();
   const instructor = String(payload.instructor || '').trim();
   const roster = parseRosterList(payload.roster || payload.preRegisteredList);
+  const isMultiSession = parseBoolFlag(payload.isMultiSession);
+  const locationEnabled = parseBoolFlag(payload.locationEnabled);
+  const locationName = locationEnabled ? String(payload.locationName || '').trim() : '';
+  const latitude = locationEnabled ? String(payload.latitude || '').trim() : '';
+  const longitude = locationEnabled ? String(payload.longitude || '').trim() : '';
+  const allowedRadius = locationEnabled ? Number(payload.allowedRadius) || 300 : '';
+  const managerCode = String(payload.managerCode || '').trim();
 
   if (!code || !name || !date || !time || !instructor) {
     return createJsonResponse({
@@ -558,6 +711,13 @@ function handleUpdateProgram(payload) {
     time,
     instructor,
     rosterSerialized,
+    toSheetFlag(isMultiSession),
+    toSheetFlag(locationEnabled),
+    locationName,
+    latitude,
+    longitude,
+    allowedRadius === '' ? '' : String(allowedRadius),
+    managerCode,
   ];
 
   const targetRange = sheet.getRange(targetRowIndex, 1, 1, PROGRAM_HEADERS.length);
@@ -567,16 +727,7 @@ function handleUpdateProgram(payload) {
   return createJsonResponse({
     status: 'success',
     message: '프로그램 정보가 수정되었습니다.',
-    data: {
-      createdAt: originalCreatedAt,
-      code: code,
-      name: name,
-      date: date,
-      time: time,
-      instructor: instructor,
-      roster: roster,
-      preRegisteredList: roster,
-    },
+    data: rowToProgramObject(updatedRow),
   });
 }
 
@@ -631,12 +782,12 @@ function handleDeleteProgram(payload) {
  * 연도별 청년 연령 자동 계산 (하드코딩 금지)
  * - 등록 연도(currentYear) 기준 연 나이 19세~39세
  *   (currentYear - 39 이상 currentYear - 19 이하) => '청년', 그 외 => '청년외'
- *   예: 2026년 -> 1987~2007년생 청년 / 2027년 -> 1988~2008년생 청년
  */
 function calculateAgeGroup(birthDateStr, currentYear) {
   const yearNum =
     Number(currentYear) || Number(Utilities.formatDate(new Date(), TIMEZONE, 'yyyy'));
-  const match = String(birthDateStr || '').trim().match(/^(\d{4})/);
+  const normalized = normalizeBirthDate(birthDateStr);
+  const match = String(normalized || '').trim().match(/^(\d{4})/);
   if (!match) {
     return '청년외';
   }
@@ -651,16 +802,18 @@ function calculateAgeGroup(birthDateStr, currentYear) {
 }
 
 /**
- * POST: 참가자 본인 출석 등록
+ * POST: 참가자 본인 출석 등록 (일반 GPS 출석 + 담당자 수동 출석 승인)
  */
 function handleRegisterParticipant(payload) {
   const programCode = String(payload.programCode || '').trim();
   const participantName = String(payload.participantName || '').replace(/\s+/g, '');
-  const birthDate = String(payload.birthDate || '').trim();
+  const birthDate = normalizeBirthDate(payload.birthDate);
   const gender = normalizeGender(payload.gender);
   const privacyConsent = String(payload.privacyConsent || '').trim();
   const deviceId = String(payload.deviceId || '').trim();
   const deviceFingerprint = String(payload.deviceFingerprint || '').trim();
+  const manualOverride = parseBoolFlag(payload.manualOverride);
+  const managerCode = String(payload.managerCode || '').trim();
 
   if (!programCode || !participantName || !birthDate || !gender) {
     return createJsonResponse({
@@ -685,14 +838,69 @@ function handleRegisterParticipant(payload) {
     });
   }
 
-  // 2. 출석부 명단 대조 (관리자가 출석부를 등록한 프로그램인 경우 이름 + 생년월일 + 성별 정확 일치 확인)
+  // 2. 담당자 수동 출석 승인 요청 시 확인 코드 검증
+  if (manualOverride) {
+    if (!isValidProgramManagerCode(program, managerCode)) {
+      return createJsonResponse({
+        status: 'invalid_manager_code',
+        message: ERROR_MSG_INVALID_MANAGER_CODE,
+      });
+    }
+  }
+
+  // 3. 한국 표준시(Asia/Seoul) 기준 등록날짜 / 등록시간 / 등록연도 생성
+  const now = new Date();
+  const currentYear = Number(Utilities.formatDate(now, TIMEZONE, 'yyyy'));
+  const regDate = Utilities.formatDate(now, TIMEZONE, 'yyyy-MM-dd');
+  const regTime = Utilities.formatDate(now, TIMEZONE, 'HH:mm:ss');
+  const attendanceDate =
+    String(payload.attendanceDate || '').trim() ||
+    Utilities.formatDate(now, TIMEZONE, 'yyyy/MM/dd');
+
+  // 4. 프로그램 일자 유효성 검증 (다회차 프로그램이 아닌 경우 설정된 일자와 당일 일치 필요)
+  if (!program.isMultiSession && program.date && program.date !== regDate) {
+    return createJsonResponse({
+      status: 'invalid_date',
+      message: '출석 가능한 일자가 아닙니다. (프로그램 일자: ' + program.date + ')',
+    });
+  }
+
+  // 5. 위치 기반 출석 반경 검증 (담당자 수동 출석 승인 시 우회)
+  if (program.locationEnabled && !manualOverride) {
+    var targetLat = Number(program.latitude);
+    var targetLng = Number(program.longitude);
+    var userLat = payload.userLat !== null && payload.userLat !== undefined && payload.userLat !== ''
+      ? Number(payload.userLat)
+      : NaN;
+    var userLng = payload.userLng !== null && payload.userLng !== undefined && payload.userLng !== ''
+      ? Number(payload.userLng)
+      : NaN;
+    var allowedRadius = Number(program.allowedRadius) || 300;
+
+    if (isNaN(userLat) || isNaN(userLng) || isNaN(targetLat) || isNaN(targetLng)) {
+      return createJsonResponse({
+        status: 'gps_error',
+        message: ERROR_MSG_GPS_FAILED,
+      });
+    }
+
+    var distance = calculateHaversineDistanceMeters(targetLat, targetLng, userLat, userLng);
+    if (distance > allowedRadius) {
+      return createJsonResponse({
+        status: 'out_of_range',
+        message: '지정된 프로그램 장소 인근(반경 ' + allowedRadius + 'm 이내)에서만 출석 등록이 가능합니다.',
+      });
+    }
+  }
+
+  // 6. 출석부 명단 대조 (이름 + 생년월일 + 성별 정확 일치 확인)
   if (program.roster.length > 0) {
     var exactMatched = false;
     for (var r = 0; r < program.roster.length; r++) {
       var candidate = program.roster[r];
       if (
         candidate.name === participantName &&
-        candidate.birthDate === birthDate &&
+        normalizeBirthDate(candidate.birthDate) === birthDate &&
         normalizeGender(candidate.gender) === gender
       ) {
         exactMatched = true;
@@ -708,22 +916,14 @@ function handleRegisterParticipant(payload) {
     }
   }
 
-  // 3. 한국 표준시(Asia/Seoul) 기준 등록날짜 / 등록시간 / 등록연도 생성
-  const now = new Date();
-  const currentYear = Number(Utilities.formatDate(now, TIMEZONE, 'yyyy'));
-  const regDate = Utilities.formatDate(now, TIMEZONE, 'yyyy-MM-dd');
-  const regTime = Utilities.formatDate(now, TIMEZONE, 'HH:mm:ss');
-  const attendanceDate =
-    String(payload.attendanceDate || '').trim() ||
-    Utilities.formatDate(now, TIMEZONE, 'yyyy/MM/dd');
-
-  // 4. 중복 출석 및 대리 출석 차단 (같은 프로그램코드 + 출석일자 기준)
+  // 7. 중복 출석 및 대리 출석 차단 (같은 프로그램코드 + 출석일자 기준)
   const sheet = getOrCreateSheet(SHEET_PARTICIPANTS, PARTICIPANT_HEADERS);
   const lastRow = sheet.getLastRow();
 
   if (lastRow >= 2) {
-    const colCount = Math.max(sheet.getLastColumn(), PARTICIPANT_HEADERS.length);
-    const existingRows = sheet.getRange(2, 1, lastRow - 1, colCount).getDisplayValues();
+    const existingRows = sheet
+      .getRange(2, 1, lastRow - 1, PARTICIPANT_HEADERS.length)
+      .getDisplayValues();
 
     for (var i = 0; i < existingRows.length; i++) {
       var row = existingRows[i];
@@ -734,8 +934,8 @@ function handleRegisterParticipant(payload) {
       var existingDeviceCell = String(row[10] || '').trim();
 
       if (existingCode === programCode && existingAttDate === attendanceDate) {
-        // ① 동일한 기기ID 또는 보조 지문(deviceFingerprint)으로 이미 제출된 이력 차단
-        if (isSameDeviceRecord(existingDeviceCell, deviceId, deviceFingerprint)) {
+        // ① 동일한 기기ID 또는 보조 지문 차단 (담당자 수동 출석 승인 시 우회)
+        if (!manualOverride && isSameDeviceRecord(existingDeviceCell, deviceId, deviceFingerprint)) {
           return createJsonResponse({
             status: 'device_duplicate',
             message: ERROR_MSG_DEVICE_DUPLICATE,
@@ -755,6 +955,7 @@ function handleRegisterParticipant(payload) {
 
   const ageGroup = calculateAgeGroup(birthDate, currentYear);
   const deviceCellValue = formatDeviceCell(deviceId, deviceFingerprint);
+  const note = manualOverride ? MANUAL_CONFIRM_NOTE : '';
 
   const newRow = [
     regDate,
@@ -768,6 +969,7 @@ function handleRegisterParticipant(payload) {
     gender,
     privacyConsent,
     deviceCellValue,
+    note,
   ];
 
   const nextRow = sheet.getLastRow() + 1;
@@ -790,6 +992,7 @@ function handleRegisterParticipant(payload) {
       gender: gender,
       privacyConsent: privacyConsent,
       deviceId: deviceId,
+      note: note,
     },
   });
 }

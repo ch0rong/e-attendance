@@ -94,7 +94,7 @@
             />
           </div>
 
-          <!-- 2) 프로그램 일자 & 3) 프로그램 시간 (균형 맞춘 2열 컴팩트 배치) -->
+          <!-- 2) 프로그램 일자 (+ 다회차 체크박스) & 3) 프로그램 시간 -->
           <div class="form-grid-2">
             <div class="form-group">
               <label for="inputProgramDate" class="form-label">
@@ -106,6 +106,10 @@
                 class="form-input form-input--date"
                 required
               />
+              <label class="checkbox-inline">
+                <input type="checkbox" id="inputIsMultiSession" />
+                <span>다회차 프로그램 (날짜 제한 해제)</span>
+              </label>
             </div>
 
             <div class="form-group">
@@ -136,7 +140,95 @@
             />
           </div>
 
-          <!-- 5) 출석부 명단 입력 영역 (선택사항 - 한 줄 가로 배치 + 다중 추가/삭제) -->
+          <!-- 5) 장소(위치) 기반 출석 제한 설정 -->
+          <div class="form-group">
+            <span class="form-label">
+              장소(위치) 제한 설정 <span class="optional-mark">(선택사항)</span>
+            </span>
+
+            <div class="location-box">
+              <label class="checkbox-inline" style="margin-top: 0; color: var(--color-text);">
+                <input type="checkbox" id="inputLocationEnabled" />
+                <span>위치 기반 출석 제한 사용</span>
+              </label>
+
+              <div id="locationFieldsWrap" class="location-fields hidden">
+                <div class="form-group">
+                  <label for="inputLocationName" class="participant-sub-label">장소명 / 메모</label>
+                  <input
+                    type="text"
+                    id="inputLocationName"
+                    class="form-input"
+                    placeholder="예: 신현생활문화센터 2층"
+                  />
+                </div>
+
+                <div class="form-group">
+                  <div class="form-label-row">
+                    <span class="participant-sub-label" style="margin-bottom: 0;">기준 좌표 (위도 / 경도)</span>
+                    <button type="button" id="fetchMyLocationBtn" class="btn btn--secondary btn--sm">
+                      현재 내 위치 좌표 불러오기
+                    </button>
+                  </div>
+                  <div class="coord-grid">
+                    <input
+                      type="text"
+                      id="inputLatitude"
+                      class="form-input"
+                      inputmode="decimal"
+                      placeholder="위도 (Latitude, 예: 37.361234)"
+                      aria-label="기준 위도"
+                    />
+                    <input
+                      type="text"
+                      id="inputLongitude"
+                      class="form-input"
+                      inputmode="decimal"
+                      placeholder="경도 (Longitude, 예: 127.255678)"
+                      aria-label="기준 경도"
+                    />
+                  </div>
+                  <p id="locationFetchStatus" class="location-status"></p>
+                </div>
+
+                <div class="form-group">
+                  <label for="inputAllowedRadius" class="participant-sub-label">허용 반경</label>
+                  <select id="inputAllowedRadius" class="form-select">
+                    <option value="100">100m</option>
+                    <option value="200">200m</option>
+                    <option value="300" selected>300m (실내 권장)</option>
+                    <option value="500">500m</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 6) 담당자 확인 코드 (현장 수동 출석 승인용 - 상시 사용) -->
+          <div class="form-group">
+            <label for="inputManagerCode" class="form-label">
+              담당자 확인 코드 <span class="required-mark" aria-hidden="true">*</span>
+            </label>
+            <div class="manager-code-row">
+              <input
+                type="text"
+                id="inputManagerCode"
+                class="form-input"
+                inputmode="numeric"
+                maxlength="8"
+                placeholder="예: 4829"
+                required
+              />
+              <button type="button" id="regenManagerCodeBtn" class="btn btn--secondary btn--sm">
+                재생성
+              </button>
+            </div>
+            <p class="form-help">
+              현장에서 GPS 오류나 기기 예외 상황 발생 시 참가자 페이지 하단의 [담당자 수동 출석 확인]에서 입력하는 승인 코드입니다.
+            </p>
+          </div>
+
+          <!-- 7) 출석부 명단 입력 영역 (선택사항 - 한 줄 가로 배치 + 다중 추가/삭제) -->
           <div class="form-group">
             <div class="form-label-row">
               <span class="form-label">
@@ -152,7 +244,7 @@
 
               <div class="roster-header-row" aria-hidden="true">
                 <span>이름</span>
-                <span>생년월일</span>
+                <span>생년월일 (6자리)</span>
                 <span>성별</span>
                 <span></span>
               </div>
@@ -208,6 +300,14 @@
           <div class="summary-row">
             <span class="summary-key">출석부 인원</span>
             <span id="resultRosterCount" class="summary-val"></span>
+          </div>
+          <div id="resultLocationRow" class="summary-row hidden">
+            <span class="summary-key">위치 제한</span>
+            <span id="resultLocationText" class="summary-val"></span>
+          </div>
+          <div id="resultManagerCodeRow" class="summary-row hidden">
+            <span class="summary-key">담당자 확인 코드</span>
+            <span id="resultManagerCodeText" class="summary-val"></span>
           </div>
         </div>
 
