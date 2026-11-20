@@ -1,9 +1,9 @@
 /**
- * 찾아가는 청년센터 - 관리자 페이지 로직 (admin.js)
+ * 광주시 청년지원센터 - 관리자 페이지 로직 (admin.js)
  */
 
 // ============================================================================
-// 설정 (config.js에서 주입 — GitHub 공개 저장소에는 실제 URL/비밀번호를 포함하지 않음)
+// 설정
 // ============================================================================
 const APP_CONFIG = window.APP_CONFIG || {};
 
@@ -12,25 +12,26 @@ const APP_CONFIG = window.APP_CONFIG || {};
 const IS_TEST_MODE =
   typeof APP_CONFIG.IS_TEST_MODE === 'boolean' ? APP_CONFIG.IS_TEST_MODE : true;
 
-// config.js(로컬) 또는 GitHub Actions Secrets(배포 시)에서 자동 주입되는 GAS 웹 앱 URL
+// GAS 웹 앱 URL (config.js 또는 배포 환경에서 주입)
 const GAS_WEB_APP_URL = String(APP_CONFIG.GAS_WEB_APP_URL || '').trim();
 
-// 로컬 테스트 모드(IS_TEST_MODE = true)에서만 사용하는 임시 비밀번호
-// 실연동 모드(IS_TEST_MODE = false)에서는 Google Apps Script 스크립트 속성(ADMIN_PASSWORD)으로만 서버 검증합니다.
-const LOCAL_TEST_PASSWORD = '1234';
+// 관리자 기본 비밀번호 상수
+const ADMIN_PASSWORD = '1234';
 
-// 인증 통과 후 메모리에만 유지하는 관리자 비밀번호 (localStorage/sessionStorage 미저장)
+// 인증 통과 후 메모리에만 유지하는 관리자 비밀번호
 let adminSessionPassword = '';
 
 const STORAGE_KEY_PROGRAMS = 'gjyouth_programs';
 const CODE_PREFIX = 'gjyouth-';
 const CODE_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const CODE_LENGTH = 6;
-const WEEKDAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
 
 const BIRTH_YEAR_MAX = 2012;
 const BIRTH_YEAR_MIN = 1960;
 const BIRTH_YEAR_DEFAULT = 2000;
+const BIRTH_MONTH_DEFAULT = 1;
+const BIRTH_DAY_DEFAULT = 1;
+const DEFAULT_BIRTH_ISO = '2000-01-01';
 
 const NAME_BLACKLIST = [
   '홍길동',
@@ -46,188 +47,38 @@ const NAME_BLACKLIST = [
   '이름',
 ];
 
-const TIME_PERIODS = ['오전', '오후'];
-const TIME_HOURS = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-const TIME_MINUTES = ['00', '30'];
-
-// 하루 48개 30분 슬롯 (시간순 정렬: 오전 12:00 ~ 오후 11:30)
-const ALL_TIME_SLOTS = (() => {
-  const slots = [];
-  TIME_PERIODS.forEach((period) => {
-    TIME_HOURS.forEach((hour) => {
-      TIME_MINUTES.forEach((minute) => {
-        const hour24 = (hour % 12) + (period === '오후' ? 12 : 0);
-        slots.push({
-          period,
-          hour: String(hour),
-          minute,
-          minutes: hour24 * 60 + Number(minute),
-        });
-      });
-    });
-  });
-  return slots;
-})();
-
-// 현재 로드된 프로그램 목록 캐시 및 수정 모드 상태
 let cachedPrograms = [];
 let editingProgramCode = null;
 
 // ============================================================================
-// 유틸리티 함수 (날짜, 시간, 사전명단, 코드 생성)
+// 유틸리티 함수
 // ============================================================================
 
-/**
- * 프로그램 일자 배열/문자열 파싱 -> 중복 제거 및 오름차순 정렬된 YYYY-MM-DD 배열 반환
- */
-function parseProgramDates(raw) {
-  let items = [];
-  if (Array.isArray(raw)) {
-    items = raw.map((v) => String(v || '').trim());
-  } else if (typeof raw === 'string' && raw.trim() !== '') {
-    items = raw.split(/[,\r\n]+/).map((v) => v.trim());
-  }
-
-  const unique = Array.from(new Set(items.filter((v) => v.length > 0)));
-  unique.sort();
-  return unique;
-}
-
-/**
- * YYYY-MM-DD 날짜에 요일 표기 (full: '2026-11-24 (화)', short: '11/24 (화)')
- */
-function formatDateWithWeekday(dateStr, short = false) {
-  const match = String(dateStr || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return String(dateStr || '');
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const weekday = WEEKDAY_LABELS[new Date(year, month - 1, day).getDay()];
-  if (short) {
-    return `${match[2]}/${match[3]} (${weekday})`;
-  }
-  return `${dateStr} (${weekday})`;
-}
-
-/**
- * 프로그램 일자 요약 문구 생성
- */
-function formatProgramDatesSummary(program) {
-  const dates = parseProgramDates(
-    Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
-  );
-  if (dates.length === 0) return String(program.date || '');
-  if (dates.length === 1) {
-    return formatDateWithWeekday(dates[0]);
-  }
-  return `총 ${dates.length}회기 (${dates.map((d) => formatDateWithWeekday(d, true)).join(', ')})`;
-}
-
-/**
- * 연/월/일 숫자를 YYYY-MM-DD 문자열로 변환
- */
-function toIsoDate(year, monthIndexZeroBased, day) {
-  const m = String(monthIndexZeroBased + 1).padStart(2, '0');
-  const d = String(day).padStart(2, '0');
-  return `${year}-${m}-${d}`;
-}
-
-/**
- * 해당 연/월의 말일 계산 (윤년 반영)
- */
 function getDaysInMonth(year, month) {
   if (!year || !month) return 31;
   return new Date(Number(year), Number(month), 0).getDate();
 }
 
-/**
- * 오전/오후 + 시(1~12) + 분(00/30) -> 자정 기준 분(0~1410) 변환
- */
-function timePartsToMinutes(period, hour12, minute) {
-  const h = Number(hour12);
-  const m = Number(minute);
-  let hour24 = h % 12;
-  if (period === '오후') {
-    hour24 += 12;
-  }
-  return hour24 * 60 + m;
+function normalizeGender(raw) {
+  const val = String(raw || '').trim();
+  if (val === '남' || val === '남성') return '남';
+  if (val === '여' || val === '여성') return '여';
+  return '';
+}
+
+function sortRosterKorean(list) {
+  return [...list].sort((a, b) => {
+    const nameDiff = a.name.localeCompare(b.name, 'ko-KR');
+    if (nameDiff !== 0) return nameDiff;
+    return String(a.birthDate || '').localeCompare(String(b.birthDate || ''));
+  });
 }
 
 /**
- * 자정 기준 분(0~1410) -> { period, hour, minute } 변환
- */
-function minutesToTimeParts(totalMinutes) {
-  const clamped = Math.max(0, Math.min(1410, totalMinutes));
-  const hour24 = Math.floor(clamped / 60);
-  const minute = String(clamped % 60).padStart(2, '0');
-  const period = hour24 < 12 ? '오전' : '오후';
-  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
-  return {
-    period,
-    hour: String(hour12),
-    minute: minute === '30' ? '30' : '00',
-  };
-}
-
-/**
- * 시간 문자열 포맷 (예: "오전 9:00 ~ 오전 11:00")
- */
-function formatTimeSlot(period, hour, minute) {
-  return `${period} ${Number(hour)}:${String(minute).padStart(2, '0')}`;
-}
-
-/**
- * 저장된 시간 문자열 파싱 (예: "오전 9:00 ~ 오전 11:00" 또는 구형 "14:00 ~ 16:00")
- */
-function parseTimeRangeString(timeStr) {
-  const defaultRange = {
-    start: { period: '오후', hour: '2', minute: '00' },
-    end: { period: '오후', hour: '4', minute: '00' },
-  };
-  if (!timeStr || typeof timeStr !== 'string') return defaultRange;
-
-  const parts = timeStr.split('~').map((s) => s.trim());
-  if (parts.length !== 2) return defaultRange;
-
-  function parseSingle(token) {
-    // 1) "오전 9:00" / "오후 2:30" 형식
-    const korMatch = token.match(/^(오전|오후)\s*(\d{1,2}):(\d{2})$/);
-    if (korMatch) {
-      const period = korMatch[1];
-      const h = Number(korMatch[2]);
-      const m = Number(korMatch[3]) >= 30 ? '30' : '00';
-      if (h >= 1 && h <= 12) {
-        return { period, hour: String(h), minute: m };
-      }
-    }
-    // 2) 구형 24시간 "14:00" 형식
-    const m24 = token.match(/^(\d{1,2}):(\d{2})$/);
-    if (m24) {
-      const h24 = Number(m24[1]);
-      const m = Number(m24[2]) >= 30 ? 30 : 0;
-      if (h24 >= 0 && h24 <= 23) {
-        return minutesToTimeParts(h24 * 60 + m);
-      }
-    }
-    return null;
-  }
-
-  const start = parseSingle(parts[0]);
-  const end = parseSingle(parts[1]);
-  if (!start || !end) return defaultRange;
-
-  const startMin = timePartsToMinutes(start.period, start.hour, start.minute);
-  const endMin = timePartsToMinutes(end.period, end.hour, end.minute);
-  if (endMin <= startMin) return defaultRange;
-
-  return { start, end };
-}
-
-/**
- * 사전 신청자 명단 정규화 (객체 배열 / JSON 문자열 / 구형 CSV 문자열 모두 지원)
+ * 출석부 명단 정규화 (배열 / JSON 문자열 / 구형 데이터 호환 + 한글 가나다순 정렬)
  * @returns {Array<{ name: string, birthDate: string, gender: string }>}
  */
-function normalizePreRegisteredList(raw) {
+function normalizeRosterList(raw) {
   let source = [];
 
   if (Array.isArray(raw)) {
@@ -237,19 +88,10 @@ function normalizePreRegisteredList(raw) {
     if (trimmed.startsWith('[')) {
       try {
         const parsed = JSON.parse(trimmed);
-        if (Array.isArray(parsed)) {
-          source = parsed;
-        }
+        if (Array.isArray(parsed)) source = parsed;
       } catch (err) {
         source = [];
       }
-    } else {
-      // 구형 쉼표/공백 구분 이름 문자열 호환
-      source = trimmed
-        .split(/[,\r\n\t\s]+/)
-        .map((n) => n.trim())
-        .filter(Boolean)
-        .map((n) => ({ name: n, birthDate: '', gender: '' }));
     }
   }
 
@@ -257,131 +99,49 @@ function normalizePreRegisteredList(raw) {
   const result = [];
 
   source.forEach((entry) => {
-    if (typeof entry === 'string') {
-      const name = entry.trim();
-      if (!name) return;
-      const key = `${name}||`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        result.push({ name, birthDate: '', gender: '' });
-      }
-      return;
-    }
+    if (!entry || typeof entry !== 'object') return;
+    const name = String(entry.name || '').replace(/\s+/g, '');
+    const birthDate = String(entry.birthDate || '').trim();
+    const gender = normalizeGender(entry.gender);
+    if (!name) return;
 
-    if (entry && typeof entry === 'object') {
-      const name = String(entry.name || '').trim();
-      const birthDate = String(entry.birthDate || '').trim();
-      const gender = String(entry.gender || '').trim();
-      if (!name) return;
-      const key = `${name}|${birthDate}|${gender}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        result.push({ name, birthDate, gender });
-      }
+    const key = `${name}|${birthDate}|${gender}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ name, birthDate, gender });
     }
   });
 
-  return result;
+  return sortRosterKorean(result);
 }
 
 /**
- * 6자리 생년월일(YYMMDD) 파싱 및 유효성 검증 -> YYYY-MM-DD 변환
+ * 이름 검증 (공백 제거 후 한글 완성형 2~5자, 3회 연속 반복 금지, 블랙리스트 차단)
  */
-function parseBirthDate6(rawValue) {
-  const digits = String(rawValue || '').replace(/\D/g, '');
-  if (!digits) {
-    return { valid: false, message: '사전 신청자의 생년월일 6자리를 입력해주세요. (예: 950213)' };
+function validateKoreanName(rawName) {
+  const cleaned = String(rawName || '').replace(/\s+/g, '');
+  if (!cleaned) {
+    return { valid: false, message: '이름을 입력해주세요.' };
   }
-  if (digits.length !== 6) {
-    return { valid: false, message: '생년월일은 숫자 6자리로 입력해주세요. (예: 950213)' };
+  if (!/^[가-힣]{2,5}$/.test(cleaned)) {
+    return {
+      valid: false,
+      message: '이름은 한글 완성형 2~5글자만 입력할 수 있습니다.',
+    };
   }
-
-  const yy = parseInt(digits.slice(0, 2), 10);
-  const mm = parseInt(digits.slice(2, 4), 10);
-  const dd = parseInt(digits.slice(4, 6), 10);
-
-  if (mm < 1 || mm > 12) {
-    return { valid: false, message: '올바른 생년월일을 입력해주세요. (월은 01~12)' };
+  if (/(.)\1{2,}/.test(cleaned)) {
+    return {
+      valid: false,
+      message: '동일한 글자를 3회 이상 반복한 이름은 등록할 수 없습니다.',
+    };
   }
-
-  const now = new Date();
-  const currentYY = now.getFullYear() % 100;
-  const fullYear = yy <= currentYY ? 2000 + yy : 1900 + yy;
-
-  const maxDays = new Date(fullYear, mm, 0).getDate();
-  if (dd < 1 || dd > maxDays) {
-    return { valid: false, message: '존재하지 않는 날짜입니다. 생년월일을 다시 확인해주세요.' };
+  if (NAME_BLACKLIST.includes(cleaned)) {
+    return {
+      valid: false,
+      message: `'${cleaned}'은(는) 사용할 수 없는 이름입니다. 올바른 실명을 입력해주세요.`,
+    };
   }
-
-  const candidate = new Date(fullYear, mm - 1, dd);
-  const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  if (candidate > todayEnd) {
-    return { valid: false, message: '미래 날짜는 입력할 수 없습니다. 생년월일을 다시 확인해주세요.' };
-  }
-
-  const iso = `${fullYear}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
-  return { valid: true, digits, iso, fullYear };
-}
-
-/**
- * YYYY-MM-DD -> YYMMDD 6자리 표기 변환 (목록 표시용)
- */
-function formatBirth6(birthDateStr) {
-  const m = String(birthDateStr || '').trim().match(/^\d{2}(\d{2})-(\d{2})-(\d{2})$/);
-  if (m) return `${m[1]}${m[2]}${m[3]}`;
-  return String(birthDateStr || '');
-}
-
-/**
- * 사전 신청자 개별 입력값 검증 (참가자 페이지와 동일한 실명 규칙 + 6자리 생년월일 + 중복 체크)
- */
-function validateRosterEntry(entry, existingList) {
-  const name = String(entry.name || '').trim();
-  const rawBirth = String(entry.birthDate || '').trim();
-  const gender = String(entry.gender || '').trim();
-
-  if (!name) {
-    return { valid: false, message: '사전 신청자 이름을 입력해주세요.' };
-  }
-  if (/\s/.test(name)) {
-    return { valid: false, message: '이름은 띄어쓰기 없이 한글 2~5글자로 입력해주세요.' };
-  }
-  if (!/^[가-힣]{2,5}$/.test(name)) {
-    return { valid: false, message: '이름은 한글 완성형 2~5글자만 입력할 수 있습니다.' };
-  }
-  if (/(.)\1{2,}/.test(name)) {
-    return { valid: false, message: '동일한 글자를 3회 이상 반복한 이름은 등록할 수 없습니다.' };
-  }
-  if (NAME_BLACKLIST.includes(name)) {
-    return { valid: false, message: '올바른 실명을 입력해주세요.' };
-  }
-
-  let normalizedBirth = '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(rawBirth)) {
-    normalizedBirth = rawBirth;
-  } else {
-    const birthCheck = parseBirthDate6(rawBirth);
-    if (!birthCheck.valid) {
-      return { valid: false, message: birthCheck.message };
-    }
-    normalizedBirth = birthCheck.iso;
-  }
-
-  if (gender !== '남성' && gender !== '여성') {
-    return { valid: false, message: '사전 신청자의 성별을 선택해주세요.' };
-  }
-
-  const isDuplicate = (existingList || []).some(
-    (item) => item.name === name && item.birthDate === normalizedBirth && item.gender === gender
-  );
-  if (isDuplicate) {
-    return { valid: false, message: '이미 사전 신청자 명단에 등록된 참가자입니다.' };
-  }
-
-  return {
-    valid: true,
-    cleaned: { name, birthDate: normalizedBirth, gender },
-  };
+  return { valid: true, cleanedName: cleaned };
 }
 
 /**
@@ -414,7 +174,7 @@ function generateProgramCode(existingCodes = []) {
 }
 
 /**
- * 현재 도메인/경로 기준 참가자 출석 등록 전용 URL 생성
+ * 현재 도메인 기준 참가자 출석 등록 전용 URL 생성
  */
 function buildAttendanceUrl(code) {
   const url = new URL('./index.html', window.location.href);
@@ -424,9 +184,14 @@ function buildAttendanceUrl(code) {
   return url.toString();
 }
 
-/**
- * 한국 형식 현재 일시 문자열 (로컬 테스트 모드용)
- */
+function getTodayIsoLocal() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 function formatLocalDateTime(dateObj = new Date()) {
   const pad = (n) => String(n).padStart(2, '0');
   return (
@@ -500,11 +265,14 @@ function getLocalPrograms() {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.map((p) => ({
-      ...p,
-      dates: parseProgramDates(Array.isArray(p.dates) && p.dates.length > 0 ? p.dates : p.date),
-      preRegisteredList: normalizePreRegisteredList(p.preRegisteredList),
-    }));
+    return parsed.map((p) => {
+      const roster = normalizeRosterList(p.roster || p.preRegisteredList);
+      return {
+        ...p,
+        roster,
+        preRegisteredList: roster,
+      };
+    });
   } catch (err) {
     return [];
   }
@@ -514,29 +282,24 @@ function saveLocalPrograms(programs) {
   localStorage.setItem(STORAGE_KEY_PROGRAMS, JSON.stringify(programs));
 }
 
-/**
- * 관리자 비밀번호 검증 (실연동 시 Google Apps Script 서버에서만 검증)
- */
 async function verifyAdminPassword(password) {
   if (IS_TEST_MODE) {
-    if (password === LOCAL_TEST_PASSWORD) {
+    if (password === ADMIN_PASSWORD) {
       return { ok: true };
     }
-    return { ok: false, message: '비밀번호가 일치하지 않습니다. (로컬 테스트 기본값: 1234)' };
+    return { ok: false, message: '비밀번호가 일치하지 않습니다.' };
   }
 
   if (!GAS_WEB_APP_URL) {
     return {
       ok: false,
-      message: 'GAS_WEB_APP_URL이 설정되지 않았습니다. config.js 또는 GitHub Secrets 설정을 확인해주세요.',
+      message: 'GAS_WEB_APP_URL이 설정되지 않았습니다. config.js 설정을 확인해주세요.',
     };
   }
 
   const response = await fetch(GAS_WEB_APP_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8',
-    },
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     redirect: 'follow',
     body: JSON.stringify({
       action: 'verifyAdmin',
@@ -565,14 +328,12 @@ async function fetchProgramList() {
   }
 
   if (!GAS_WEB_APP_URL) {
-    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다. config.js 또는 GitHub Secrets 설정을 확인해주세요.');
+    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다.');
   }
 
   const response = await fetch(GAS_WEB_APP_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8',
-    },
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     redirect: 'follow',
     body: JSON.stringify({
       action: 'listPrograms',
@@ -590,18 +351,19 @@ async function fetchProgramList() {
   }
 
   return Array.isArray(result.data)
-    ? result.data.map((p) => ({
-        ...p,
-        dates: parseProgramDates(Array.isArray(p.dates) && p.dates.length > 0 ? p.dates : p.date),
-        preRegisteredList: normalizePreRegisteredList(p.preRegisteredList),
-      }))
+    ? result.data.map((p) => {
+        const roster = normalizeRosterList(p.roster || p.preRegisteredList);
+        return {
+          ...p,
+          roster,
+          preRegisteredList: roster,
+        };
+      })
     : [];
 }
 
 async function saveNewProgram(programData) {
-  const normalizedDates = parseProgramDates(programData.dates || programData.date);
-  const dateString = normalizedDates.join(', ');
-  const normalizedRoster = normalizePreRegisteredList(programData.preRegisteredList);
+  const sortedRoster = normalizeRosterList(programData.roster);
 
   if (IS_TEST_MODE) {
     const list = getLocalPrograms();
@@ -609,11 +371,11 @@ async function saveNewProgram(programData) {
       createdAt: formatLocalDateTime(),
       code: programData.code,
       name: programData.name,
-      date: dateString,
-      dates: normalizedDates,
+      date: programData.date,
       time: programData.time,
       instructor: programData.instructor,
-      preRegisteredList: normalizedRoster,
+      roster: sortedRoster,
+      preRegisteredList: sortedRoster,
     };
     list.unshift(record);
     saveLocalPrograms(list);
@@ -621,25 +383,22 @@ async function saveNewProgram(programData) {
   }
 
   if (!GAS_WEB_APP_URL) {
-    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다. config.js 또는 GitHub Secrets 설정을 확인해주세요.');
+    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다.');
   }
 
   const response = await fetch(GAS_WEB_APP_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8',
-    },
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     redirect: 'follow',
     body: JSON.stringify({
       action: 'createProgram',
       adminPassword: adminSessionPassword,
       code: programData.code,
       name: programData.name,
-      date: dateString,
-      dates: normalizedDates,
+      date: programData.date,
       time: programData.time,
       instructor: programData.instructor,
-      preRegisteredList: normalizedRoster,
+      roster: sortedRoster,
     }),
   });
 
@@ -652,16 +411,13 @@ async function saveNewProgram(programData) {
     throw new Error(result.message || '프로그램 생성에 실패했습니다.');
   }
 
-  return result.data;
+  const saved = result.data || {};
+  const roster = normalizeRosterList(saved.roster || saved.preRegisteredList || sortedRoster);
+  return { ...saved, roster, preRegisteredList: roster };
 }
 
-/**
- * 기존 프로그램 수정 (프로그램목록만 갱신, 기존 참가자명단 출석 기록은 변경하지 않음)
- */
 async function updateExistingProgram(programData) {
-  const normalizedDates = parseProgramDates(programData.dates || programData.date);
-  const dateString = normalizedDates.join(', ');
-  const normalizedRoster = normalizePreRegisteredList(programData.preRegisteredList);
+  const sortedRoster = normalizeRosterList(programData.roster);
 
   if (IS_TEST_MODE) {
     const list = getLocalPrograms();
@@ -669,15 +425,14 @@ async function updateExistingProgram(programData) {
     if (idx === -1) {
       throw new Error('수정할 프로그램을 찾을 수 없습니다.');
     }
-
     const updated = {
       ...list[idx],
       name: programData.name,
-      date: dateString,
-      dates: normalizedDates,
+      date: programData.date,
       time: programData.time,
       instructor: programData.instructor,
-      preRegisteredList: normalizedRoster,
+      roster: sortedRoster,
+      preRegisteredList: sortedRoster,
     };
     list[idx] = updated;
     saveLocalPrograms(list);
@@ -685,25 +440,22 @@ async function updateExistingProgram(programData) {
   }
 
   if (!GAS_WEB_APP_URL) {
-    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다. config.js 또는 GitHub Secrets 설정을 확인해주세요.');
+    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다.');
   }
 
   const response = await fetch(GAS_WEB_APP_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8',
-    },
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     redirect: 'follow',
     body: JSON.stringify({
       action: 'updateProgram',
       adminPassword: adminSessionPassword,
       code: programData.code,
       name: programData.name,
-      date: dateString,
-      dates: normalizedDates,
+      date: programData.date,
       time: programData.time,
       instructor: programData.instructor,
-      preRegisteredList: normalizedRoster,
+      roster: sortedRoster,
     }),
   });
 
@@ -716,12 +468,11 @@ async function updateExistingProgram(programData) {
     throw new Error(result.message || '프로그램 수정에 실패했습니다.');
   }
 
-  return result.data;
+  const saved = result.data || {};
+  const roster = normalizeRosterList(saved.roster || saved.preRegisteredList || sortedRoster);
+  return { ...saved, roster, preRegisteredList: roster };
 }
 
-/**
- * 프로그램(링크) 삭제 (프로그램목록에서만 제거, 기존 참가자명단 출석 기록은 유지)
- */
 async function deleteProgramByCode(code) {
   if (IS_TEST_MODE) {
     const list = getLocalPrograms();
@@ -734,14 +485,12 @@ async function deleteProgramByCode(code) {
   }
 
   if (!GAS_WEB_APP_URL) {
-    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다. config.js 또는 GitHub Secrets 설정을 확인해주세요.');
+    throw new Error('GAS_WEB_APP_URL이 설정되지 않았습니다.');
   }
 
   const response = await fetch(GAS_WEB_APP_URL, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8',
-    },
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     redirect: 'follow',
     body: JSON.stringify({
       action: 'deleteProgram',
@@ -763,14 +512,16 @@ async function deleteProgramByCode(code) {
 }
 
 // ============================================================================
-// UI 렌더링 및 이벤트 바인딩
+// UI 초기화 및 이벤트 바인딩
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
-  // 헤더 테스트 모드 배지
+  // 테스트 모드 배지
+  const authTestModeBadge = document.getElementById('authTestModeBadge');
   const testModeBadge = document.getElementById('testModeBadge');
-  if (IS_TEST_MODE && testModeBadge) {
-    testModeBadge.classList.remove('hidden');
+  if (IS_TEST_MODE) {
+    if (authTestModeBadge) authTestModeBadge.classList.remove('hidden');
+    if (testModeBadge) testModeBadge.classList.remove('hidden');
   }
 
   // 인증 요소
@@ -778,6 +529,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const authForm = document.getElementById('authForm');
   const adminPasswordInput = document.getElementById('adminPasswordInput');
   const authError = document.getElementById('authError');
+  const authSubmitBtn = document.getElementById('authSubmitBtn');
   const adminDashboard = document.getElementById('adminDashboard');
 
   // 폼 카드 / 수정 모드 요소
@@ -789,855 +541,708 @@ document.addEventListener('DOMContentLoaded', () => {
   const programFormTitle = document.getElementById('programFormTitle');
   const programFormSubtitle = document.getElementById('programFormSubtitle');
 
-  // 생성/수정 폼 기본 요소
+  // 기본 입력 요소
   const createProgramForm = document.getElementById('createProgramForm');
   const inputProgramName = document.getElementById('inputProgramName');
+  const inputProgramDate = document.getElementById('inputProgramDate');
+  const inputProgramTime = document.getElementById('inputProgramTime');
   const inputInstructor = document.getElementById('inputInstructor');
   const createAlert = document.getElementById('createAlert');
   const createProgramBtn = document.getElementById('createProgramBtn');
 
-  // 다회기 복수 날짜 선택 달력 요소
-  const selectedDateCountPill = document.getElementById('selectedDateCountPill');
-  const calPrevMonthBtn = document.getElementById('calPrevMonthBtn');
-  const calNextMonthBtn = document.getElementById('calNextMonthBtn');
-  const calMonthLabel = document.getElementById('calMonthLabel');
-  const calTodayBtn = document.getElementById('calTodayBtn');
-  const calClearDatesBtn = document.getElementById('calClearDatesBtn');
-  const calWeekdays = document.getElementById('calWeekdays');
-  const calDaysGrid = document.getElementById('calDaysGrid');
-  const selectedDatesWrap = document.getElementById('selectedDatesWrap');
-
-  // 시간 드롭다운 요소
-  const startPeriodSelect = document.getElementById('startPeriod');
-  const startHourSelect = document.getElementById('startHour');
-  const startMinuteSelect = document.getElementById('startMinute');
-  const endPeriodSelect = document.getElementById('endPeriod');
-  const endHourSelect = document.getElementById('endHour');
-  const endMinuteSelect = document.getElementById('endMinute');
-  const timePreviewText = document.getElementById('timePreviewText');
-
-  // 사전 신청자 구조화 빌더 요소
+  // 출석부 명단 행 리스트 요소
   const rosterCountPill = document.getElementById('rosterCountPill');
-  const rosterNameInput = document.getElementById('rosterNameInput');
-  const rosterBirthInput = document.getElementById('rosterBirthInput');
-  const rosterAddError = document.getElementById('rosterAddError');
-  const addRosterBtn = document.getElementById('addRosterBtn');
-  const rosterListContainer = document.getElementById('rosterListContainer');
+  const rosterRowsContainer = document.getElementById('rosterRowsContainer');
+  const addRosterRowBtn = document.getElementById('addRosterRowBtn');
 
-  // 생성/수정 결과 카드 요소
+  // 생성 결과 카드 요소
   const createdResultSection = document.getElementById('createdResultSection');
   const resultTitleText = document.getElementById('resultTitleText');
   const resultCodeBadge = document.getElementById('resultCodeBadge');
   const resultProgramName = document.getElementById('resultProgramName');
   const resultDateTime = document.getElementById('resultDateTime');
   const resultInstructor = document.getElementById('resultInstructor');
-  const resultMode = document.getElementById('resultMode');
+  const resultRosterCount = document.getElementById('resultRosterCount');
   const resultUrlInput = document.getElementById('resultUrlInput');
   const copyResultUrlBtn = document.getElementById('copyResultUrlBtn');
   const openResultUrlLink = document.getElementById('openResultUrlLink');
 
-  // 목록 요소
+  // 프로그램 목록 요소
   const refreshListBtn = document.getElementById('refreshListBtn');
   const programListLoading = document.getElementById('programListLoading');
   const programListError = document.getElementById('programListError');
   const programListContainer = document.getElementById('programListContainer');
 
-  // 페이지 진입 시 비밀번호 입력 포커스
-  adminPasswordInput.focus();
+  // 기본 일자: 오늘 날짜
+  inputProgramDate.value = getTodayIsoLocal();
 
   // --------------------------------------------------------------------------
-  // 1. 관리자 비밀번호 인증 (실연동 시 Google Apps Script 서버 검증)
+  // 1. 알림 헬퍼
   // --------------------------------------------------------------------------
-  const authSubmitBtn = authForm.querySelector('button[type="submit"]');
+  function showCreateAlert(message) {
+    createAlert.textContent = message;
+    createAlert.classList.remove('hidden');
+  }
 
+  function hideCreateAlert() {
+    createAlert.textContent = '';
+    createAlert.classList.add('hidden');
+  }
+
+  // --------------------------------------------------------------------------
+  // 2. 출석부 1줄 가로 그리드 행 생성 / 삭제 / 갱신
+  // --------------------------------------------------------------------------
+  function populateDaySelect(daySelect, year, month, preferredDay) {
+    const maxDays = getDaysInMonth(year, month);
+    const targetDay = Math.min(Number(preferredDay) || 1, maxDays);
+    daySelect.innerHTML = '';
+    for (let d = 1; d <= maxDays; d++) {
+      const opt = document.createElement('option');
+      opt.value = String(d).padStart(2, '0');
+      opt.textContent = `${d}일`;
+      if (d === targetDay) opt.selected = true;
+      daySelect.appendChild(opt);
+    }
+  }
+
+  function updateRosterSummaryUI() {
+    const rows = Array.from(rosterRowsContainer.querySelectorAll('.roster-row'));
+
+    // 첫 번째 행(index === 0)의 삭제 버튼은 숨기고, 2번째 행부터 우측 끝에 표시
+    rows.forEach((row, index) => {
+      const delBtn = row.querySelector('.roster-row-delete');
+      if (!delBtn) return;
+      if (index === 0) {
+        delBtn.classList.add('is-hidden');
+        delBtn.setAttribute('aria-hidden', 'true');
+        delBtn.tabIndex = -1;
+      } else {
+        delBtn.classList.remove('is-hidden');
+        delBtn.removeAttribute('aria-hidden');
+        delBtn.tabIndex = 0;
+      }
+    });
+
+    // 이름 입력된 행 수 계산
+    let filledCount = 0;
+    rows.forEach((row) => {
+      const nameVal = row.querySelector('.roster-name-input').value.replace(/\s+/g, '');
+      if (nameVal.length > 0) filledCount++;
+    });
+
+    if (filledCount > 0) {
+      rosterCountPill.textContent = `출석부 ${filledCount}명 입력`;
+      rosterCountPill.classList.add('has-names');
+    } else {
+      rosterCountPill.textContent = '현장 등록 모드';
+      rosterCountPill.classList.remove('has-names');
+    }
+  }
+
+  function createRosterRow(initialData = null) {
+    const row = document.createElement('div');
+    row.className = 'roster-row';
+    row.dataset.gender = '';
+    row.dataset.birthTouched = 'false';
+
+    // ① 이름 입력칸
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'form-input roster-name-input';
+    nameInput.placeholder = '이름';
+    nameInput.maxLength = 10;
+    nameInput.setAttribute('aria-label', '참가자 이름');
+    if (initialData && initialData.name) {
+      nameInput.value = initialData.name;
+    }
+
+    // ② 생년월일 3개 셀렉트 ([연도][월][일], 여백 없이 촘촘히 배치, 기본값 2000-01-01)
+    const birthGroup = document.createElement('div');
+    birthGroup.className = 'birth-select-group';
+
+    let initYear = BIRTH_YEAR_DEFAULT;
+    let initMonth = BIRTH_MONTH_DEFAULT;
+    let initDay = BIRTH_DAY_DEFAULT;
+
+    if (initialData && initialData.birthDate) {
+      const m = String(initialData.birthDate).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (m) {
+        initYear = Number(m[1]);
+        initMonth = Number(m[2]);
+        initDay = Number(m[3]);
+        row.dataset.birthTouched = 'true';
+      }
+    }
+
+    const yearSelect = document.createElement('select');
+    yearSelect.className = 'form-select roster-birth-year';
+    yearSelect.setAttribute('aria-label', '출생 연도');
+    for (let y = BIRTH_YEAR_MAX; y >= BIRTH_YEAR_MIN; y--) {
+      const opt = document.createElement('option');
+      opt.value = String(y);
+      opt.textContent = `${y}년`;
+      if (y === initYear) opt.selected = true;
+      yearSelect.appendChild(opt);
+    }
+
+    const monthSelect = document.createElement('select');
+    monthSelect.className = 'form-select roster-birth-month';
+    monthSelect.setAttribute('aria-label', '출생 월');
+    for (let m = 1; m <= 12; m++) {
+      const opt = document.createElement('option');
+      opt.value = String(m).padStart(2, '0');
+      opt.textContent = `${m}월`;
+      if (m === initMonth) opt.selected = true;
+      monthSelect.appendChild(opt);
+    }
+
+    const daySelect = document.createElement('select');
+    daySelect.className = 'form-select roster-birth-day';
+    daySelect.setAttribute('aria-label', '출생 일');
+    populateDaySelect(daySelect, initYear, initMonth, initDay);
+
+    const handleBirthChange = () => {
+      row.dataset.birthTouched = 'true';
+      populateDaySelect(daySelect, Number(yearSelect.value), Number(monthSelect.value), Number(daySelect.value));
+      hideCreateAlert();
+    };
+
+    yearSelect.addEventListener('change', handleBirthChange);
+    monthSelect.addEventListener('change', handleBirthChange);
+    daySelect.addEventListener('change', () => {
+      row.dataset.birthTouched = 'true';
+      hideCreateAlert();
+    });
+
+    birthGroup.appendChild(yearSelect);
+    birthGroup.appendChild(monthSelect);
+    birthGroup.appendChild(daySelect);
+
+    // ③ 성별 토글 버튼 ([남] [여] 미니 세그먼트 버튼)
+    const genderSegment = document.createElement('div');
+    genderSegment.className = 'gender-segment';
+    genderSegment.setAttribute('role', 'radiogroup');
+    genderSegment.setAttribute('aria-label', '성별 선택');
+
+    const initGender = initialData ? normalizeGender(initialData.gender) : '';
+    row.dataset.gender = initGender;
+
+    ['남', '여'].forEach((label) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'gender-segment-btn';
+      btn.dataset.gender = label;
+      btn.textContent = label;
+      btn.setAttribute('role', 'radio');
+      const isSelected = initGender === label;
+      btn.setAttribute('aria-checked', String(isSelected));
+      if (isSelected) btn.classList.add('is-active');
+
+      btn.addEventListener('click', () => {
+        const current = row.dataset.gender;
+        const next = current === label ? '' : label;
+        row.dataset.gender = next;
+        genderSegment.classList.remove('is-invalid');
+        genderSegment.querySelectorAll('.gender-segment-btn').forEach((b) => {
+          const active = b.dataset.gender === next;
+          b.classList.toggle('is-active', active);
+          b.setAttribute('aria-checked', String(active));
+        });
+        hideCreateAlert();
+      });
+
+      genderSegment.appendChild(btn);
+    });
+
+    // ④ 행 삭제 버튼 (×)
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'roster-row-delete';
+    deleteBtn.setAttribute('aria-label', '참가자 행 삭제');
+    deleteBtn.title = '행 삭제';
+    deleteBtn.textContent = '×';
+    deleteBtn.addEventListener('click', () => {
+      row.remove();
+      if (rosterRowsContainer.querySelectorAll('.roster-row').length === 0) {
+        rosterRowsContainer.appendChild(createRosterRow());
+      }
+      updateRosterSummaryUI();
+      hideCreateAlert();
+    });
+
+    nameInput.addEventListener('input', () => {
+      nameInput.classList.remove('is-invalid');
+      updateRosterSummaryUI();
+      hideCreateAlert();
+    });
+
+    row.appendChild(nameInput);
+    row.appendChild(birthGroup);
+    row.appendChild(genderSegment);
+    row.appendChild(deleteBtn);
+
+    return row;
+  }
+
+  function resetRosterRows(entries = []) {
+    rosterRowsContainer.innerHTML = '';
+    if (Array.isArray(entries) && entries.length > 0) {
+      entries.forEach((entry) => {
+        rosterRowsContainer.appendChild(createRosterRow(entry));
+      });
+    } else {
+      rosterRowsContainer.appendChild(createRosterRow());
+    }
+    updateRosterSummaryUI();
+  }
+
+  addRosterRowBtn.addEventListener('click', () => {
+    const newRow = createRosterRow();
+    rosterRowsContainer.appendChild(newRow);
+    updateRosterSummaryUI();
+    const input = newRow.querySelector('.roster-name-input');
+    if (input) input.focus();
+  });
+
+  /**
+   * 출석부 입력 행 전체 검증 및 한글 가나다순 자동 정렬
+   */
+  function collectAndValidateRosterRows() {
+    const rows = Array.from(rosterRowsContainer.querySelectorAll('.roster-row'));
+    const validEntries = [];
+    const seenPersonKeys = new Set();
+
+    // 기존 invalid 스타일 초기화
+    rows.forEach((row) => {
+      row.querySelector('.roster-name-input').classList.remove('is-invalid');
+      row.querySelector('.gender-segment').classList.remove('is-invalid');
+    });
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 1;
+      const nameInput = row.querySelector('.roster-name-input');
+      const yearSelect = row.querySelector('.roster-birth-year');
+      const monthSelect = row.querySelector('.roster-birth-month');
+      const daySelect = row.querySelector('.roster-birth-day');
+      const genderSegment = row.querySelector('.gender-segment');
+
+      const rawName = nameInput.value;
+      const cleanedName = rawName.replace(/\s+/g, '');
+      const birthDate = `${yearSelect.value}-${monthSelect.value}-${daySelect.value}`;
+      const gender = row.dataset.gender || '';
+      const birthChanged = row.dataset.birthTouched === 'true' && birthDate !== DEFAULT_BIRTH_ISO;
+
+      // 완전히 비어있는 행은 무시
+      if (!cleanedName && !gender && !birthChanged) {
+        continue;
+      }
+
+      // 일부만 입력된 행 (이름이 비었는데 성별이나 생년월일을 건드린 경우) 경고
+      if (!cleanedName) {
+        nameInput.classList.add('is-invalid');
+        nameInput.focus();
+        return {
+          valid: false,
+          message: `출석부 ${rowNum}번째 행의 이름을 입력해주세요. (사용하지 않는 행은 삭제해주세요)`,
+        };
+      }
+
+      // 이름 유효성 검증 (한글 완성형 2~5자, 3회 연속 반복 금지, 블랙리스트 차단)
+      const nameCheck = validateKoreanName(cleanedName);
+      if (!nameCheck.valid) {
+        nameInput.classList.add('is-invalid');
+        nameInput.focus();
+        return {
+          valid: false,
+          message: `출석부 ${rowNum}번째 행: ${nameCheck.message}`,
+        };
+      }
+
+      // 성별 미선택 경고
+      if (gender !== '남' && gender !== '여') {
+        genderSegment.classList.add('is-invalid');
+        const firstGenderBtn = genderSegment.querySelector('.gender-segment-btn');
+        if (firstGenderBtn) firstGenderBtn.focus();
+        return {
+          valid: false,
+          message: `출석부 ${rowNum}번째 행(${nameCheck.cleanedName})의 성별을 선택해주세요.`,
+        };
+      }
+
+      // 중복 입력 차단 (이름 + 생년월일 기준)
+      const personKey = `${nameCheck.cleanedName}|${birthDate}`;
+      if (seenPersonKeys.has(personKey)) {
+        nameInput.classList.add('is-invalid');
+        nameInput.focus();
+        return {
+          valid: false,
+          message: `출석부 ${rowNum}번째 행(${nameCheck.cleanedName}, ${birthDate})이 중복 입력되었습니다.`,
+        };
+      }
+
+      seenPersonKeys.add(personKey);
+      validEntries.push({
+        name: nameCheck.cleanedName,
+        birthDate,
+        gender,
+      });
+    }
+
+    // 이름 기준 한글 가나다순 오름차순 자동 정렬
+    const sorted = sortRosterKorean(validEntries);
+    return { valid: true, roster: sorted };
+  }
+
+  // 초기 빈 행 1개 생성
+  resetRosterRows();
+
+  // --------------------------------------------------------------------------
+  // 3. 수정 모드 전환 / 초기화
+  // --------------------------------------------------------------------------
+  function resetFormToCreateMode() {
+    editingProgramCode = null;
+    editModeBanner.classList.add('hidden');
+    cancelEditBottomBtn.classList.add('hidden');
+    programFormTitle.textContent = '새 프로그램 생성';
+    programFormSubtitle.textContent =
+      '프로그램 정보와 출석부 명단을 입력해 참가자 출석 등록용 전용 링크를 발급합니다.';
+    createProgramBtn.textContent = '프로그램 생성 및 저장';
+
+    createProgramForm.reset();
+    inputProgramDate.value = getTodayIsoLocal();
+    resetRosterRows();
+    hideCreateAlert();
+  }
+
+  function enterEditMode(program) {
+    editingProgramCode = program.code;
+    editModeCodeLabel.textContent = program.code;
+    editModeBanner.classList.remove('hidden');
+    cancelEditBottomBtn.classList.remove('hidden');
+    programFormTitle.textContent = '프로그램 정보 수정';
+    programFormSubtitle.textContent =
+      '수정 내용을 저장하면 새 출석 등록부터 반영되며, 기존 출석 기록은 유지됩니다.';
+    createProgramBtn.textContent = '변경사항 저장';
+
+    inputProgramName.value = program.name || '';
+    inputProgramDate.value = program.date || getTodayIsoLocal();
+    inputProgramTime.value = program.time || '';
+    inputInstructor.value = program.instructor || '';
+    resetRosterRows(normalizeRosterList(program.roster || program.preRegisteredList));
+    hideCreateAlert();
+
+    programFormCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    inputProgramName.focus();
+  }
+
+  cancelEditBtn.addEventListener('click', resetFormToCreateMode);
+  cancelEditBottomBtn.addEventListener('click', resetFormToCreateMode);
+
+  // --------------------------------------------------------------------------
+  // 4. 관리자 비밀번호 인증
+  // --------------------------------------------------------------------------
   authForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const entered = adminPasswordInput.value;
+    const entered = adminPasswordInput.value.trim();
+
+    authError.textContent = '';
+    authError.classList.remove('visible');
+    adminPasswordInput.classList.remove('is-invalid');
 
     if (!entered) {
-      authError.textContent = '비밀번호를 입력해주세요.';
+      authError.textContent = '관리자 비밀번호를 입력해주세요.';
       authError.classList.add('visible');
       adminPasswordInput.classList.add('is-invalid');
       adminPasswordInput.focus();
       return;
     }
 
-    if (authSubmitBtn) {
-      authSubmitBtn.disabled = true;
-      authSubmitBtn.textContent = '인증 확인 중...';
-    }
+    authSubmitBtn.disabled = true;
+    authSubmitBtn.textContent = '확인 중...';
 
     try {
       const result = await verifyAdminPassword(entered);
       if (result.ok) {
         adminSessionPassword = entered;
         adminPasswordInput.value = '';
-        authError.textContent = '';
-        authError.classList.remove('visible');
-        adminPasswordInput.classList.remove('is-invalid');
-
         authSection.classList.add('hidden');
         adminDashboard.classList.remove('hidden');
-
-        loadAndRenderProgramList();
+        loadProgramList();
       } else {
-        authError.textContent = result.message || '비밀번호가 일치하지 않습니다. 다시 확인해주세요.';
+        authError.textContent = result.message || '비밀번호가 일치하지 않습니다.';
         authError.classList.add('visible');
         adminPasswordInput.classList.add('is-invalid');
-        adminPasswordInput.select();
+        adminPasswordInput.value = '';
+        adminPasswordInput.focus();
       }
     } catch (err) {
-      authError.textContent = err.message || '서버 인증 중 오류가 발생했습니다.';
+      authError.textContent = err.message || '인증 확인 중 오류가 발생했습니다.';
       authError.classList.add('visible');
     } finally {
-      if (authSubmitBtn) {
-        authSubmitBtn.disabled = false;
-        authSubmitBtn.textContent = '확인';
-      }
+      authSubmitBtn.disabled = false;
+      authSubmitBtn.textContent = '확인';
     }
   });
 
   adminPasswordInput.addEventListener('input', () => {
+    authError.textContent = '';
     authError.classList.remove('visible');
     adminPasswordInput.classList.remove('is-invalid');
   });
 
   // --------------------------------------------------------------------------
-  // 2. 다회기 복수 날짜 선택 달력 (개별 클릭 + 요일별 일괄 토글)
+  // 5. 생성 / 수정 결과 카드 표시
   // --------------------------------------------------------------------------
-  const todayObj = new Date();
-  const todayIso = toIsoDate(todayObj.getFullYear(), todayObj.getMonth(), todayObj.getDate());
-  let calViewYear = todayObj.getFullYear();
-  let calViewMonth = todayObj.getMonth();
-  const selectedDates = new Set();
-
-  function getSortedSelectedDates() {
-    return Array.from(selectedDates).sort();
-  }
-
-  function renderWeekdayHeaders() {
-    calWeekdays.innerHTML = '';
-    WEEKDAY_LABELS.forEach((label, weekdayIdx) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'calendar-weekday-btn';
-      if (weekdayIdx === 0) btn.classList.add('is-sun');
-      if (weekdayIdx === 6) btn.classList.add('is-sat');
-      btn.textContent = label;
-      btn.title = `${calViewMonth + 1}월의 모든 ${label}요일 선택/해제`;
-      btn.addEventListener('click', () => {
-        toggleWeekdayInCurrentMonth(weekdayIdx);
-      });
-      calWeekdays.appendChild(btn);
-    });
-  }
-
-  function toggleWeekdayInCurrentMonth(weekdayIdx) {
-    const daysInMonth = new Date(calViewYear, calViewMonth + 1, 0).getDate();
-    const matchingDates = [];
-    for (let day = 1; day <= daysInMonth; day++) {
-      if (new Date(calViewYear, calViewMonth, day).getDay() === weekdayIdx) {
-        matchingDates.push(toIsoDate(calViewYear, calViewMonth, day));
-      }
-    }
-
-    const allSelected = matchingDates.every((d) => selectedDates.has(d));
-    matchingDates.forEach((d) => {
-      if (allSelected) {
-        selectedDates.delete(d);
-      } else {
-        selectedDates.add(d);
-      }
-    });
-
-    hideCreateError();
-    renderCalendar();
-  }
-
-  function renderCalendar() {
-    calMonthLabel.textContent = `${calViewYear}년 ${calViewMonth + 1}월`;
-    renderWeekdayHeaders();
-
-    const firstDayOfWeek = new Date(calViewYear, calViewMonth, 1).getDay();
-    const daysInMonth = new Date(calViewYear, calViewMonth + 1, 0).getDate();
-
-    calDaysGrid.innerHTML = '';
-
-    for (let i = 0; i < firstDayOfWeek; i++) {
-      const emptyCell = document.createElement('span');
-      emptyCell.className = 'calendar-day-empty';
-      emptyCell.setAttribute('aria-hidden', 'true');
-      calDaysGrid.appendChild(emptyCell);
-    }
-
-    for (let day = 1; day <= daysInMonth; day++) {
-      const iso = toIsoDate(calViewYear, calViewMonth, day);
-      const weekday = new Date(calViewYear, calViewMonth, day).getDay();
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'calendar-day-btn';
-      btn.textContent = String(day);
-      btn.dataset.date = iso;
-      btn.setAttribute('aria-pressed', selectedDates.has(iso) ? 'true' : 'false');
-
-      if (weekday === 0) btn.classList.add('is-sun');
-      if (weekday === 6) btn.classList.add('is-sat');
-      if (iso === todayIso) btn.classList.add('is-today');
-      if (selectedDates.has(iso)) btn.classList.add('is-selected');
-
-      btn.addEventListener('click', () => {
-        if (selectedDates.has(iso)) {
-          selectedDates.delete(iso);
-        } else {
-          selectedDates.add(iso);
-        }
-        hideCreateError();
-        renderCalendar();
-      });
-
-      calDaysGrid.appendChild(btn);
-    }
-
-    renderSelectedDatesSummary();
-  }
-
-  function renderSelectedDatesSummary() {
-    const sorted = getSortedSelectedDates();
-    calClearDatesBtn.disabled = sorted.length === 0;
-
-    if (sorted.length === 0) {
-      selectedDateCountPill.textContent = '날짜 미선택';
-      selectedDateCountPill.classList.remove('has-names');
-
-      selectedDatesWrap.innerHTML = '';
-      const emptyText = document.createElement('span');
-      emptyText.className = 'selected-dates-empty';
-      emptyText.textContent = '달력에서 프로그램 진행 날짜를 클릭해 선택하세요.';
-      selectedDatesWrap.appendChild(emptyText);
-      return;
-    }
-
-    selectedDateCountPill.textContent =
-      sorted.length === 1 ? '1회기 선택' : `총 ${sorted.length}회기 선택`;
-    selectedDateCountPill.classList.add('has-names');
-
-    selectedDatesWrap.innerHTML = '';
-    sorted.forEach((iso) => {
-      const chip = document.createElement('span');
-      chip.className = 'date-chip';
-
-      const textSpan = document.createElement('span');
-      textSpan.textContent = formatDateWithWeekday(iso);
-
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'date-chip-remove';
-      removeBtn.setAttribute('aria-label', `${iso} 선택 해제`);
-      removeBtn.textContent = '×';
-      removeBtn.addEventListener('click', () => {
-        selectedDates.delete(iso);
-        renderCalendar();
-      });
-
-      chip.appendChild(textSpan);
-      chip.appendChild(removeBtn);
-      selectedDatesWrap.appendChild(chip);
-    });
-  }
-
-  calPrevMonthBtn.addEventListener('click', () => {
-    calViewMonth -= 1;
-    if (calViewMonth < 0) {
-      calViewMonth = 11;
-      calViewYear -= 1;
-    }
-    renderCalendar();
-  });
-
-  calNextMonthBtn.addEventListener('click', () => {
-    calViewMonth += 1;
-    if (calViewMonth > 11) {
-      calViewMonth = 0;
-      calViewYear += 1;
-    }
-    renderCalendar();
-  });
-
-  calTodayBtn.addEventListener('click', () => {
-    calViewYear = todayObj.getFullYear();
-    calViewMonth = todayObj.getMonth();
-    renderCalendar();
-  });
-
-  calClearDatesBtn.addEventListener('click', () => {
-    selectedDates.clear();
-    renderCalendar();
-  });
-
-  renderCalendar();
-
-  // --------------------------------------------------------------------------
-  // 3. 프로그램 시간 드롭다운 (오전/오후 + 1~12시 + 00/30분, 종료시간 동적 필터링)
-  // --------------------------------------------------------------------------
-  function populateStartHourOptions(preferredHour) {
-    const prev = preferredHour || startHourSelect.value || '2';
-    startHourSelect.innerHTML = '';
-    TIME_HOURS.forEach((h) => {
-      const opt = document.createElement('option');
-      opt.value = String(h);
-      opt.textContent = `${h}시`;
-      startHourSelect.appendChild(opt);
-    });
-    startHourSelect.value = TIME_HOURS.map(String).includes(String(prev)) ? String(prev) : '2';
-  }
-
-  function populateStartMinuteOptions(preferredMinute) {
-    const prev = preferredMinute || startMinuteSelect.value || '00';
-    const isLastHourOfDay = startPeriodSelect.value === '오후' && startHourSelect.value === '11';
-    // 오후 11:30은 하루의 마지막 슬롯이므로 시작시간에서 제외 (종료시간 11:30 보장)
-    const allowedMinutes = isLastHourOfDay ? ['00'] : TIME_MINUTES;
-
-    startMinuteSelect.innerHTML = '';
-    allowedMinutes.forEach((m) => {
-      const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = `${m}분`;
-      startMinuteSelect.appendChild(opt);
-    });
-    startMinuteSelect.value = allowedMinutes.includes(prev) ? prev : allowedMinutes[0];
-  }
-
-  function getStartMinutes() {
-    return timePartsToMinutes(
-      startPeriodSelect.value,
-      startHourSelect.value,
-      startMinuteSelect.value
-    );
-  }
-
-  function getEndMinutes() {
-    return timePartsToMinutes(
-      endPeriodSelect.value,
-      endHourSelect.value,
-      endMinuteSelect.value
-    );
-  }
-
-  function syncEndTimeOptions(preferredEnd = null) {
-    const startMin = getStartMinutes();
-    const validSlots = ALL_TIME_SLOTS.filter((slot) => slot.minutes > startMin);
-
-    // 현재 선택값 또는 원하는 기본 종료값
-    const prevPeriod = preferredEnd ? preferredEnd.period : endPeriodSelect.value;
-    const prevHour = preferredEnd ? preferredEnd.hour : endHourSelect.value;
-    const prevMinute = preferredEnd ? preferredEnd.minute : endMinuteSelect.value;
-
-    const prevEndStillValid =
-      prevPeriod &&
-      prevHour &&
-      prevMinute &&
-      validSlots.some(
-        (s) => s.period === prevPeriod && s.hour === String(prevHour) && s.minute === prevMinute
-      );
-
-    // 이전 종료시간이 더 이상 유효하지 않으면 시작시간 + 2시간(없으면 마지막 슬롯)을 추천 선택
-    let targetSlot = null;
-    if (prevEndStillValid) {
-      targetSlot = { period: prevPeriod, hour: String(prevHour), minute: prevMinute };
-    } else {
-      const idealMin = startMin + 120;
-      targetSlot =
-        validSlots.find((s) => s.minutes >= idealMin) || validSlots[validSlots.length - 1];
-    }
-
-    // 1) 종료 오전/오후
-    const validPeriods = Array.from(new Set(validSlots.map((s) => s.period)));
-    endPeriodSelect.innerHTML = '';
-    validPeriods.forEach((p) => {
-      const opt = document.createElement('option');
-      opt.value = p;
-      opt.textContent = p;
-      endPeriodSelect.appendChild(opt);
-    });
-    endPeriodSelect.value = validPeriods.includes(targetSlot.period)
-      ? targetSlot.period
-      : validPeriods[0];
-
-    // 2) 종료 시 (선택된 종료 오전/오후에 해당하는 시작 이후 시간만 노출)
-    syncEndHourAndMinuteOptions(targetSlot.hour, targetSlot.minute);
-  }
-
-  function syncEndHourAndMinuteOptions(preferredHour = null, preferredMinute = null) {
-    const startMin = getStartMinutes();
-    const selectedEndPeriod = endPeriodSelect.value;
-    const periodSlots = ALL_TIME_SLOTS.filter(
-      (slot) => slot.minutes > startMin && slot.period === selectedEndPeriod
-    );
-
-    const validHours = Array.from(new Set(periodSlots.map((s) => s.hour)));
-    const targetHour = preferredHour || endHourSelect.value;
-
-    endHourSelect.innerHTML = '';
-    validHours.forEach((h) => {
-      const opt = document.createElement('option');
-      opt.value = h;
-      opt.textContent = `${h}시`;
-      endHourSelect.appendChild(opt);
-    });
-    endHourSelect.value = validHours.includes(String(targetHour))
-      ? String(targetHour)
-      : validHours[0];
-
-    syncEndMinuteOptions(preferredMinute);
-  }
-
-  function syncEndMinuteOptions(preferredMinute = null) {
-    const startMin = getStartMinutes();
-    const selectedEndPeriod = endPeriodSelect.value;
-    const selectedEndHour = endHourSelect.value;
-    const validMinutes = ALL_TIME_SLOTS.filter(
-      (slot) =>
-        slot.minutes > startMin &&
-        slot.period === selectedEndPeriod &&
-        slot.hour === selectedEndHour
-    ).map((s) => s.minute);
-
-    const targetMinute = preferredMinute || endMinuteSelect.value;
-
-    endMinuteSelect.innerHTML = '';
-    validMinutes.forEach((m) => {
-      const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = `${m}분`;
-      endMinuteSelect.appendChild(opt);
-    });
-    endMinuteSelect.value = validMinutes.includes(targetMinute) ? targetMinute : validMinutes[0];
-
-    updateTimePreview();
-  }
-
-  function updateTimePreview() {
-    const startText = formatTimeSlot(
-      startPeriodSelect.value,
-      startHourSelect.value,
-      startMinuteSelect.value
-    );
-    const endText = formatTimeSlot(
-      endPeriodSelect.value,
-      endHourSelect.value,
-      endMinuteSelect.value
-    );
-    timePreviewText.textContent = `${startText} ~ ${endText}`;
-  }
-
-  function getSelectedTimeRangeString() {
-    const startText = formatTimeSlot(
-      startPeriodSelect.value,
-      startHourSelect.value,
-      startMinuteSelect.value
-    );
-    const endText = formatTimeSlot(
-      endPeriodSelect.value,
-      endHourSelect.value,
-      endMinuteSelect.value
-    );
-    return `${startText} ~ ${endText}`;
-  }
-
-  function setTimeDropdowns(range) {
-    startPeriodSelect.value = range.start.period;
-    populateStartHourOptions(range.start.hour);
-    populateStartMinuteOptions(range.start.minute);
-    syncEndTimeOptions(range.end);
-  }
-
-  startPeriodSelect.addEventListener('change', () => {
-    populateStartMinuteOptions(startMinuteSelect.value);
-    syncEndTimeOptions();
-    hideCreateError();
-  });
-
-  startHourSelect.addEventListener('change', () => {
-    populateStartMinuteOptions(startMinuteSelect.value);
-    syncEndTimeOptions();
-    hideCreateError();
-  });
-
-  startMinuteSelect.addEventListener('change', () => {
-    syncEndTimeOptions();
-    hideCreateError();
-  });
-
-  endPeriodSelect.addEventListener('change', () => {
-    syncEndHourAndMinuteOptions();
-    hideCreateError();
-  });
-
-  endHourSelect.addEventListener('change', () => {
-    syncEndMinuteOptions();
-    hideCreateError();
-  });
-
-  endMinuteSelect.addEventListener('change', () => {
-    updateTimePreview();
-    hideCreateError();
-  });
-
-  // 기본 시간 초기화: 오후 2:00 ~ 오후 4:00
-  setTimeDropdowns({
-    start: { period: '오후', hour: '2', minute: '00' },
-    end: { period: '오후', hour: '4', minute: '00' },
-  });
-
-  // --------------------------------------------------------------------------
-  // 4. 사전 신청자 구조화 빌더 (이름 + 생년월일 6자리 + 성별 + 추가 버튼)
-  // --------------------------------------------------------------------------
-  let rosterEntries = [];
-
-  function resetRosterInputs() {
-    rosterNameInput.value = '';
-    rosterBirthInput.value = '';
-    document.querySelectorAll('input[name="rosterGender"]').forEach((r) => {
-      r.checked = false;
-    });
-    clearRosterAddError();
-  }
-
-  function showRosterAddError(message) {
-    rosterAddError.textContent = message;
-    rosterAddError.classList.add('visible');
-  }
-
-  function clearRosterAddError() {
-    rosterAddError.textContent = '';
-    rosterAddError.classList.remove('visible');
-  }
-
-  function renderRosterList() {
-    if (rosterEntries.length > 0) {
-      rosterCountPill.textContent = `사전명단 ${rosterEntries.length}명`;
-      rosterCountPill.classList.add('has-names');
-    } else {
-      rosterCountPill.textContent = '현장자유등록';
-      rosterCountPill.classList.remove('has-names');
-    }
-
-    rosterListContainer.innerHTML = '';
-
-    if (rosterEntries.length === 0) {
-      const emptyEl = document.createElement('div');
-      emptyEl.className = 'roster-list-empty';
-      emptyEl.textContent = '등록된 사전 신청자가 없습니다. (비워두면 현장 자유 참여 모드로 운영됩니다)';
-      rosterListContainer.appendChild(emptyEl);
-      return;
-    }
-
-    rosterEntries.forEach((entry, idx) => {
-      const row = document.createElement('div');
-      row.className = 'roster-item';
-
-      const info = document.createElement('div');
-      info.className = 'roster-item-info';
-
-      const numBadge = document.createElement('span');
-      numBadge.className = 'roster-item-index';
-      numBadge.textContent = String(idx + 1);
-
-      const nameEl = document.createElement('span');
-      nameEl.className = 'roster-item-name';
-      nameEl.textContent = entry.name;
-
-      const detailEl = document.createElement('span');
-      detailEl.className = 'roster-item-detail';
-      const detailParts = [];
-      if (entry.birthDate) detailParts.push(formatBirth6(entry.birthDate));
-      if (entry.gender) detailParts.push(entry.gender);
-      detailEl.textContent = detailParts.length > 0 ? detailParts.join(' · ') : '이름만 등록됨(구버전)';
-
-      info.appendChild(numBadge);
-      info.appendChild(nameEl);
-      info.appendChild(detailEl);
-
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'roster-remove-btn';
-      removeBtn.textContent = '삭제';
-      removeBtn.addEventListener('click', () => {
-        rosterEntries.splice(idx, 1);
-        renderRosterList();
-      });
-
-      row.appendChild(info);
-      row.appendChild(removeBtn);
-      rosterListContainer.appendChild(row);
-    });
-  }
-
-  function handleAddRosterParticipant() {
-    clearRosterAddError();
-
-    const genderRadio = document.querySelector('input[name="rosterGender"]:checked');
-    const validation = validateRosterEntry(
-      {
-        name: rosterNameInput.value,
-        birthDate: rosterBirthInput.value,
-        gender: genderRadio ? genderRadio.value : '',
-      },
-      rosterEntries
-    );
-
-    if (!validation.valid) {
-      showRosterAddError(validation.message);
-      return;
-    }
-
-    rosterEntries.push(validation.cleaned);
-    resetRosterInputs();
-    renderRosterList();
-    rosterNameInput.focus();
-  }
-
-  rosterBirthInput.addEventListener('input', () => {
-    const digitsOnly = rosterBirthInput.value.replace(/\D/g, '').slice(0, 6);
-    if (rosterBirthInput.value !== digitsOnly) {
-      rosterBirthInput.value = digitsOnly;
-    }
-    clearRosterAddError();
-  });
-
-  rosterBirthInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleAddRosterParticipant();
-    }
-  });
-
-  rosterNameInput.addEventListener('input', clearRosterAddError);
-  rosterNameInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      handleAddRosterParticipant();
-    }
-  });
-  document.querySelectorAll('input[name="rosterGender"]').forEach((r) => {
-    r.addEventListener('change', clearRosterAddError);
-  });
-  addRosterBtn.addEventListener('click', handleAddRosterParticipant);
-
-  renderRosterList();
-
-  // --------------------------------------------------------------------------
-  // 5. 프로그램 수정 모드 전환 / 취소
-  // --------------------------------------------------------------------------
-  function startEditProgram(program) {
-    editingProgramCode = program.code;
-    hideCreateError();
-
-    editModeCodeLabel.textContent = program.code;
-    editModeBanner.classList.remove('hidden');
-    cancelEditBottomBtn.classList.remove('hidden');
-
-    programFormTitle.textContent = '프로그램 수정';
-    programFormSubtitle.textContent =
-      '수정한 내용은 저장 이후 등록되는 출석부터 적용되며, 기존 출석 기록은 변경되지 않습니다.';
-    createProgramBtn.textContent = '수정 내용 저장';
-
-    // 1) 프로그램명 / 강사명
-    inputProgramName.value = program.name || '';
-    inputInstructor.value = program.instructor || '';
-
-    // 2) 다회기 날짜 달력 세팅
-    selectedDates.clear();
-    const programDates = parseProgramDates(
-      Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
-    );
-    programDates.forEach((d) => selectedDates.add(d));
-    if (programDates.length > 0) {
-      const m = programDates[0].match(/^(\d{4})-(\d{2})-\d{2}$/);
-      if (m) {
-        calViewYear = Number(m[1]);
-        calViewMonth = Number(m[2]) - 1;
-      }
-    }
-    renderCalendar();
-
-    // 3) 시간 드롭다운 세팅
-    setTimeDropdowns(parseTimeRangeString(program.time));
-
-    // 4) 사전 신청자 명단 세팅
-    rosterEntries = normalizePreRegisteredList(program.preRegisteredList).map((item) => ({ ...item }));
-    resetRosterInputs();
-    renderRosterList();
-
-    programFormCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-
-  function exitEditMode() {
-    editingProgramCode = null;
-    hideCreateError();
-
-    editModeBanner.classList.add('hidden');
-    cancelEditBottomBtn.classList.add('hidden');
-
-    programFormTitle.textContent = '새 프로그램 생성';
-    programFormSubtitle.textContent =
-      '프로그램 정보를 입력하면 고유 코드가 자동 발급되고 참가자 출석 등록용 전용 링크가 생성됩니다.';
-    createProgramBtn.textContent = '프로그램 생성 및 링크 발급';
-
-    createProgramForm.reset();
-    selectedDates.clear();
-    calViewYear = todayObj.getFullYear();
-    calViewMonth = todayObj.getMonth();
-    renderCalendar();
-
-    setTimeDropdowns({
-      start: { period: '오후', hour: '2', minute: '00' },
-      end: { period: '오후', hour: '4', minute: '00' },
-    });
-
-    rosterEntries = [];
-    resetRosterInputs();
-    renderRosterList();
-  }
-
-  cancelEditBtn.addEventListener('click', exitEditMode);
-  cancelEditBottomBtn.addEventListener('click', exitEditMode);
-
-  // --------------------------------------------------------------------------
-  // 6. 프로그램 생성 / 수정 폼 제출
-  // --------------------------------------------------------------------------
-  function showCreateError(message) {
-    createAlert.textContent = message;
-    createAlert.classList.remove('hidden');
-  }
-
-  function hideCreateError() {
-    createAlert.textContent = '';
-    createAlert.classList.add('hidden');
-  }
-
-  createProgramForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    hideCreateError();
-
-    const name = inputProgramName.value.trim();
-    const dates = getSortedSelectedDates();
-    const startMin = getStartMinutes();
-    const endMin = getEndMinutes();
-    const time = getSelectedTimeRangeString();
-    const instructor = inputInstructor.value.trim();
-    const preRegisteredList = rosterEntries.map((item) => ({ ...item }));
-
-    if (!name) {
-      showCreateError('프로그램명을 입력해주세요.');
-      inputProgramName.focus();
-      return;
-    }
-    if (dates.length === 0) {
-      showCreateError('프로그램 일자를 달력에서 1개 이상 선택해주세요.');
-      calDaysGrid.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
-    if (endMin <= startMin) {
-      showCreateError('종료 시간은 시작 시간보다 이후여야 합니다.');
-      endHourSelect.focus();
-      return;
-    }
-    if (!instructor) {
-      showCreateError('강사명을 입력해주세요.');
-      inputInstructor.focus();
-      return;
-    }
-
-    const isEditing = Boolean(editingProgramCode);
-    createProgramBtn.disabled = true;
-    createProgramBtn.textContent = isEditing ? '수정 내용 저장 중...' : '프로그램 생성 중...';
-
-    try {
-      let savedProgram;
-      if (isEditing) {
-        savedProgram = await updateExistingProgram({
-          code: editingProgramCode,
-          name,
-          date: dates.join(', '),
-          dates,
-          time,
-          instructor,
-          preRegisteredList,
-        });
-      } else {
-        const existingCodes = cachedPrograms.map((p) => p.code);
-        const code = generateProgramCode(existingCodes);
-        savedProgram = await saveNewProgram({
-          code,
-          name,
-          date: dates.join(', '),
-          dates,
-          time,
-          instructor,
-          preRegisteredList,
-        });
-      }
-
-      renderCreatedResult(savedProgram, isEditing);
-      exitEditMode();
-
-      await loadAndRenderProgramList();
-      createdResultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    } catch (err) {
-      showCreateError(
-        err.message || (isEditing ? '프로그램 수정 중 오류가 발생했습니다.' : '프로그램 생성 중 오류가 발생했습니다.')
-      );
-    } finally {
-      createProgramBtn.disabled = false;
-      createProgramBtn.textContent = editingProgramCode
-        ? '수정 내용 저장'
-        : '프로그램 생성 및 링크 발급';
-    }
-  });
-
-  // --------------------------------------------------------------------------
-  // 7. 생성 / 수정 완료 결과 카드 렌더링
-  // --------------------------------------------------------------------------
-  function renderCreatedResult(program, isUpdated = false) {
+  function showResultCard(program, isEdit = false) {
     const attendanceUrl = buildAttendanceUrl(program.code);
-    const list = normalizePreRegisteredList(program.preRegisteredList);
+    const roster = normalizeRosterList(program.roster || program.preRegisteredList);
 
-    resultTitleText.textContent = isUpdated
+    resultTitleText.textContent = isEdit
       ? '프로그램 정보가 수정되었습니다'
       : '프로그램이 생성되었습니다';
     resultCodeBadge.textContent = program.code;
     resultProgramName.textContent = program.name;
-    resultDateTime.textContent = `${formatProgramDatesSummary(program)} · ${program.time}`;
+    resultDateTime.textContent = `${program.date} · ${program.time}`;
     resultInstructor.textContent = program.instructor;
-    resultMode.textContent =
-      list.length > 0
-        ? `사전명단 ${list.length}명 (이름·생년월일·성별 일치 시 출석 가능)`
-        : '현장자유등록 (누구나 등록 가능)';
+    resultRosterCount.textContent =
+      roster.length > 0
+        ? `출석부 ${roster.length}명 (가나다순 정렬 완료)`
+        : '현장 등록 모드 (0명 / 인원 제한 없음)';
 
     resultUrlInput.value = attendanceUrl;
     openResultUrlLink.href = attendanceUrl;
 
-    copyResultUrlBtn.textContent = '링크 복사';
-    copyResultUrlBtn.classList.remove('btn--copied');
-
     createdResultSection.classList.remove('hidden');
+    createdResultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   copyResultUrlBtn.addEventListener('click', () => {
-    if (resultUrlInput.value) {
-      copyTextWithFeedback(resultUrlInput.value, copyResultUrlBtn);
+    if (!resultUrlInput.value) return;
+    copyTextWithFeedback(resultUrlInput.value, copyResultUrlBtn);
+  });
+
+  // --------------------------------------------------------------------------
+  // 6. 프로그램 생성 및 저장 제출
+  // --------------------------------------------------------------------------
+  createProgramForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideCreateAlert();
+
+    const name = inputProgramName.value.trim();
+    const date = inputProgramDate.value.trim();
+    const time = inputProgramTime.value.trim();
+    const instructor = inputInstructor.value.trim();
+
+    if (!name) {
+      showCreateAlert('프로그램명을 입력해주세요.');
+      inputProgramName.focus();
+      return;
+    }
+    if (!date) {
+      showCreateAlert('프로그램 일자를 선택해주세요.');
+      inputProgramDate.focus();
+      return;
+    }
+    if (!time) {
+      showCreateAlert('프로그램 시간을 입력해주세요. (예: 14:00 ~ 16:00)');
+      inputProgramTime.focus();
+      return;
+    }
+    if (!instructor) {
+      showCreateAlert('강사명을 입력해주세요.');
+      inputInstructor.focus();
+      return;
+    }
+
+    const rosterValidation = collectAndValidateRosterRows();
+    if (!rosterValidation.valid) {
+      showCreateAlert(rosterValidation.message);
+      return;
+    }
+
+    const isEditing = Boolean(editingProgramCode);
+    const targetCode = isEditing
+      ? editingProgramCode
+      : generateProgramCode(cachedPrograms.map((p) => p.code));
+
+    createProgramBtn.disabled = true;
+    createProgramBtn.textContent = isEditing ? '수정 저장 중...' : '프로그램 저장 중...';
+
+    try {
+      const savedProgram = isEditing
+        ? await updateExistingProgram({
+            code: targetCode,
+            name,
+            date,
+            time,
+            instructor,
+            roster: rosterValidation.roster,
+          })
+        : await saveNewProgram({
+            code: targetCode,
+            name,
+            date,
+            time,
+            instructor,
+            roster: rosterValidation.roster,
+          });
+
+      showResultCard(savedProgram, isEditing);
+      resetFormToCreateMode();
+      await loadProgramList();
+    } catch (err) {
+      showCreateAlert(err.message || '프로그램 저장 중 오류가 발생했습니다.');
+    } finally {
+      createProgramBtn.disabled = false;
+      createProgramBtn.textContent = editingProgramCode
+        ? '변경사항 저장'
+        : '프로그램 생성 및 저장';
     }
   });
 
-  resultUrlInput.addEventListener('click', () => {
-    resultUrlInput.select();
-  });
+  // --------------------------------------------------------------------------
+  // 7. 기존 생성된 프로그램 목록 조회 및 렌더링
+  // --------------------------------------------------------------------------
+  function renderProgramList(programs) {
+    programListContainer.innerHTML = '';
 
-  // --------------------------------------------------------------------------
-  // 8. 기존 프로그램 목록 불러오기 및 렌더링
-  // --------------------------------------------------------------------------
-  async function loadAndRenderProgramList() {
+    if (!programs || programs.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-state';
+      empty.textContent = '아직 생성된 프로그램이 없습니다. 위 양식에서 첫 프로그램을 생성해보세요.';
+      programListContainer.appendChild(empty);
+      return;
+    }
+
+    programs.forEach((program) => {
+      const attendanceUrl = buildAttendanceUrl(program.code);
+      const roster = normalizeRosterList(program.roster || program.preRegisteredList);
+
+      const item = document.createElement('article');
+      item.className = 'program-item';
+
+      // 상단: 프로그램명 + 배지
+      const top = document.createElement('div');
+      top.className = 'program-item-top';
+
+      const nameEl = document.createElement('h3');
+      nameEl.className = 'program-item-name';
+      nameEl.textContent = program.name;
+
+      const badges = document.createElement('div');
+      badges.className = 'program-item-badges';
+
+      const codeBadge = document.createElement('span');
+      codeBadge.className = 'badge badge--code';
+      codeBadge.textContent = program.code;
+
+      const modeBadge = document.createElement('span');
+      if (roster.length > 0) {
+        modeBadge.className = 'badge badge--primary';
+        modeBadge.textContent = `출석부 ${roster.length}명`;
+      } else {
+        modeBadge.className = 'badge badge--open';
+        modeBadge.textContent = '현장 등록';
+      }
+
+      badges.appendChild(codeBadge);
+      badges.appendChild(modeBadge);
+      top.appendChild(nameEl);
+      top.appendChild(badges);
+
+      // 메타: 일시, 강사명, 생성일시
+      const meta = document.createElement('div');
+      meta.className = 'program-item-meta';
+
+      const dateSpan = document.createElement('span');
+      dateSpan.textContent = `일시: ${program.date} ${program.time}`;
+
+      const instructorSpan = document.createElement('span');
+      instructorSpan.textContent = `강사: ${program.instructor}`;
+
+      meta.appendChild(dateSpan);
+      meta.appendChild(instructorSpan);
+
+      if (program.createdAt) {
+        const createdSpan = document.createElement('span');
+        createdSpan.textContent = `생성: ${program.createdAt}`;
+        meta.appendChild(createdSpan);
+      }
+
+      // 링크 + 버튼
+      const linkRow = document.createElement('div');
+      linkRow.className = 'program-item-link-row';
+
+      const linkAnchor = document.createElement('a');
+      linkAnchor.className = 'program-item-url';
+      linkAnchor.href = attendanceUrl;
+      linkAnchor.target = '_blank';
+      linkAnchor.rel = 'noopener noreferrer';
+      linkAnchor.textContent = attendanceUrl;
+
+      const actions = document.createElement('div');
+      actions.className = 'program-item-actions';
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'btn btn--secondary btn--sm';
+      copyBtn.textContent = '링크 복사';
+      copyBtn.addEventListener('click', () => {
+        copyTextWithFeedback(attendanceUrl, copyBtn);
+      });
+
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button';
+      editBtn.className = 'btn btn--secondary btn--sm';
+      editBtn.textContent = '수정';
+      editBtn.addEventListener('click', () => {
+        enterEditMode(program);
+      });
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'btn btn--danger-outline btn--sm';
+      deleteBtn.textContent = '삭제';
+      deleteBtn.addEventListener('click', async () => {
+        const ok = window.confirm(
+          `[${program.name}] (${program.code}) 프로그램을 삭제하시겠습니까?\n기존 출석 완료 기록은 유지됩니다.`
+        );
+        if (!ok) return;
+
+        deleteBtn.disabled = true;
+        deleteBtn.textContent = '삭제 중...';
+        try {
+          await deleteProgramByCode(program.code);
+          if (editingProgramCode === program.code) {
+            resetFormToCreateMode();
+          }
+          if (resultCodeBadge.textContent === program.code) {
+            createdResultSection.classList.add('hidden');
+          }
+          await loadProgramList();
+        } catch (err) {
+          alert(err.message || '프로그램 삭제 중 오류가 발생했습니다.');
+          deleteBtn.disabled = false;
+          deleteBtn.textContent = '삭제';
+        }
+      });
+
+      actions.appendChild(copyBtn);
+      actions.appendChild(editBtn);
+      actions.appendChild(deleteBtn);
+
+      linkRow.appendChild(linkAnchor);
+      linkRow.appendChild(actions);
+
+      item.appendChild(top);
+      item.appendChild(meta);
+      item.appendChild(linkRow);
+      programListContainer.appendChild(item);
+    });
+  }
+
+  async function loadProgramList() {
     programListError.classList.add('hidden');
     programListLoading.classList.remove('hidden');
     programListContainer.innerHTML = '';
@@ -1654,163 +1259,5 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function renderProgramList(programs) {
-    programListContainer.innerHTML = '';
-
-    if (!programs || programs.length === 0) {
-      const emptyEl = document.createElement('div');
-      emptyEl.className = 'empty-state';
-      emptyEl.textContent = '아직 생성된 프로그램이 없습니다. 위 폼에서 첫 프로그램을 생성해보세요.';
-      programListContainer.appendChild(emptyEl);
-      return;
-    }
-
-    programs.forEach((program) => {
-      const list = normalizePreRegisteredList(program.preRegisteredList);
-      const dates = parseProgramDates(
-        Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
-      );
-      const attendanceUrl = buildAttendanceUrl(program.code);
-
-      const item = document.createElement('article');
-      item.className = 'program-item';
-
-      // 상단: 프로그램명 + 배지(다회기, 명단 제한 여부, 코드)
-      const topRow = document.createElement('div');
-      topRow.className = 'program-item-top';
-
-      const nameEl = document.createElement('h3');
-      nameEl.className = 'program-item-name';
-      nameEl.textContent = program.name;
-
-      const badgesEl = document.createElement('div');
-      badgesEl.className = 'program-item-badges';
-
-      if (dates.length > 1) {
-        const sessionBadge = document.createElement('span');
-        sessionBadge.className = 'badge badge--sessions';
-        sessionBadge.textContent = `총 ${dates.length}회기`;
-        badgesEl.appendChild(sessionBadge);
-      }
-
-      const modeBadge = document.createElement('span');
-      if (list.length > 0) {
-        modeBadge.className = 'badge badge--restricted';
-        modeBadge.textContent = `사전명단 ${list.length}명`;
-      } else {
-        modeBadge.className = 'badge badge--open';
-        modeBadge.textContent = '현장자유등록';
-      }
-
-      const codeBadge = document.createElement('span');
-      codeBadge.className = 'badge badge--code';
-      codeBadge.textContent = program.code;
-
-      badgesEl.appendChild(modeBadge);
-      badgesEl.appendChild(codeBadge);
-      topRow.appendChild(nameEl);
-      topRow.appendChild(badgesEl);
-
-      // 중간: 일자, 시간, 강사명
-      const metaEl = document.createElement('div');
-      metaEl.className = 'program-item-meta';
-
-      const dateSpan = document.createElement('span');
-      dateSpan.textContent =
-        dates.length === 1
-          ? `일자: ${formatDateWithWeekday(dates[0])}`
-          : `일자: ${dates.map((d) => formatDateWithWeekday(d, true)).join(', ')}`;
-
-      const timeSpan = document.createElement('span');
-      timeSpan.textContent = `시간: ${program.time}`;
-
-      const instructorSpan = document.createElement('span');
-      instructorSpan.textContent = `강사: ${program.instructor}`;
-
-      metaEl.appendChild(dateSpan);
-      metaEl.appendChild(timeSpan);
-      metaEl.appendChild(instructorSpan);
-
-      // 하단: 전용 링크 + [수정] / [링크 복사] / [삭제] 버튼
-      const linkRow = document.createElement('div');
-      linkRow.className = 'program-item-link-row';
-
-      const linkAnchor = document.createElement('a');
-      linkAnchor.className = 'program-item-url';
-      linkAnchor.href = attendanceUrl;
-      linkAnchor.target = '_blank';
-      linkAnchor.rel = 'noopener noreferrer';
-      linkAnchor.textContent = attendanceUrl;
-      linkAnchor.title = attendanceUrl;
-
-      const actionsEl = document.createElement('div');
-      actionsEl.className = 'program-item-actions';
-
-      const editBtn = document.createElement('button');
-      editBtn.type = 'button';
-      editBtn.className = 'btn btn--secondary btn--sm';
-      editBtn.textContent = '수정';
-      editBtn.addEventListener('click', () => {
-        startEditProgram(program);
-      });
-
-      const copyBtn = document.createElement('button');
-      copyBtn.type = 'button';
-      copyBtn.className = 'btn btn--secondary btn--sm';
-      copyBtn.textContent = '링크 복사';
-      copyBtn.addEventListener('click', () => {
-        copyTextWithFeedback(attendanceUrl, copyBtn);
-      });
-
-      const deleteBtn = document.createElement('button');
-      deleteBtn.type = 'button';
-      deleteBtn.className = 'btn btn--danger-outline btn--sm';
-      deleteBtn.textContent = '삭제';
-      deleteBtn.addEventListener('click', async () => {
-        const confirmed = window.confirm(
-          `'${program.name}' (${program.code}) 프로그램 링크를 삭제하시겠습니까?\n\n삭제하면 해당 링크로 더 이상 출석 등록을 할 수 없으며, 기존 참가자 출석 기록은 그대로 유지됩니다.`
-        );
-        if (!confirmed) return;
-
-        deleteBtn.disabled = true;
-        deleteBtn.textContent = '삭제 중...';
-        programListError.classList.add('hidden');
-
-        try {
-          await deleteProgramByCode(program.code);
-
-          // 삭제한 프로그램이 수정 중이거나 결과 카드에 표시 중이면 정리
-          if (editingProgramCode === program.code) {
-            exitEditMode();
-          }
-          if (resultCodeBadge.textContent === program.code) {
-            createdResultSection.classList.add('hidden');
-          }
-
-          await loadAndRenderProgramList();
-        } catch (err) {
-          programListError.textContent = err.message || '프로그램 삭제 중 오류가 발생했습니다.';
-          programListError.classList.remove('hidden');
-          deleteBtn.disabled = false;
-          deleteBtn.textContent = '삭제';
-        }
-      });
-
-      actionsEl.appendChild(editBtn);
-      actionsEl.appendChild(copyBtn);
-      actionsEl.appendChild(deleteBtn);
-
-      linkRow.appendChild(linkAnchor);
-      linkRow.appendChild(actionsEl);
-
-      item.appendChild(topRow);
-      item.appendChild(metaEl);
-      item.appendChild(linkRow);
-      programListContainer.appendChild(item);
-    });
-  }
-
-  refreshListBtn.addEventListener('click', () => {
-    loadAndRenderProgramList();
-  });
+  refreshListBtn.addEventListener('click', loadProgramList);
 });
