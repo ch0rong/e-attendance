@@ -19,6 +19,8 @@ const STORAGE_KEY_PROGRAMS = 'gjyouth_programs';
 const STORAGE_KEY_PARTICIPANTS = 'gjyouth_participants';
 const STORAGE_KEY_DEVICE_ID = 'gjyouth_device_id';
 const STORAGE_KEY_SUBMITTED_MAP = 'gjyouth_submitted_records';
+const SESSION_KEY_QR_ACCESS = 'gjyouth_qr_access_session';
+const QR_SESSION_TTL_MS = 3 * 60 * 1000; // QR 스캔 후 3분 유효
 
 const IDB_NAME = 'gjyouth_attendance_db';
 const IDB_VERSION = 1;
@@ -45,14 +47,107 @@ const ERROR_MSG_DEVICE_DUPLICATE = '이미 이 기기에서 출석 등록이 완
 const ERROR_MSG_PARTICIPANT_DUPLICATE = '이미 출석 처리가 완료된 참가자입니다.';
 const ERROR_MSG_GPS_FAILED = '위치 정보를 확인할 수 없습니다. 스마트폰의 위치(GPS) 권한을 허용해주세요.';
 const ERROR_MSG_INVALID_MANAGER_CODE = '담당자 확인 코드가 일치하지 않습니다.';
+const ERROR_MSG_INVALID_QR_ACCESS = '잘못된 접근입니다. 현장에 비치된 QR코드를 직접 스캔해 주세요.';
+const ERROR_MSG_SESSION_EXPIRED = '인증 시간이 만료되었습니다. QR코드를 다시 스캔해 주세요.';
+const ERROR_MSG_BEFORE_CLASS = '수업 시작 전입니다.';
+const ERROR_MSG_AFTER_CLASS = '수업이 종료되었습니다.';
 const MANUAL_CONFIRM_NOTE = '담당자 수동확인';
 
 let currentProgram = null;
 let currentDeviceId = '';
 let currentDeviceFingerprint = '';
 let currentAttendanceDate = '';
+let activeProgramCode = '';
+let qrScannedAt = 0;
 let manualModalTriggerSource = 'form'; // 'form' | 'already'
 let approvedManualCode = ''; // 담당자 확인 코드 사전 승인 상태
+
+// ============================================================================
+// QR 세션 초기화 및 주소창 URL 즉시 변조 (외부 링크 공유 방지)
+// ============================================================================
+
+function generateInvalidTokenSuffix(length = 10) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    const bytes = new Uint32Array(length);
+    window.crypto.getRandomValues(bytes);
+    for (let i = 0; i < length; i++) {
+      result += chars[bytes[i] % chars.length];
+    }
+    return result;
+  }
+  for (let i = 0; i < length; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return result;
+}
+
+function clearQrAccessSession() {
+  activeProgramCode = '';
+  qrScannedAt = 0;
+  try {
+    if (window.sessionStorage) {
+      window.sessionStorage.removeItem(SESSION_KEY_QR_ACCESS);
+    }
+  } catch (err) {}
+}
+
+/**
+ * 페이지 로드 직후 실행:
+ * - 정상 code 파라미터로 진입 시 JS 변수 & sessionStorage에 code + 스캔 타임스탬프 기록 후
+ *   window.history.replaceState로 주소창을 ?token=invalid_xxxxx로 즉시 덮어씀
+ * - code 파라미터가 없으면 sessionStorage의 기존 정상 진입 기록만 확인 (공유 링크 차단)
+ */
+function initializeQrAccessSession() {
+  const params = new URLSearchParams(window.location.search);
+  const urlCode = (params.get('code') || '').trim();
+
+  if (urlCode) {
+    activeProgramCode = urlCode;
+    qrScannedAt = Date.now();
+    try {
+      if (window.sessionStorage) {
+        window.sessionStorage.setItem(
+          SESSION_KEY_QR_ACCESS,
+          JSON.stringify({ code: activeProgramCode, scannedAt: qrScannedAt })
+        );
+      }
+    } catch (err) {}
+
+    try {
+      if (window.history && typeof window.history.replaceState === 'function') {
+        const pathname = window.location.pathname || './index.html';
+        const maskedUrl = `${pathname}?token=invalid_${generateInvalidTokenSuffix(10)}`;
+        window.history.replaceState(null, '', maskedUrl);
+      }
+    } catch (err) {}
+
+    return { valid: true, code: activeProgramCode, scannedAt: qrScannedAt };
+  }
+
+  // URL에 code가 없는 경우 (변조된 링크 공유 접속 등): sessionStorage에 정상 진입 기록이 있을 때만 허용
+  try {
+    if (window.sessionStorage) {
+      const raw = window.sessionStorage.getItem(SESSION_KEY_QR_ACCESS);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.code === 'string' && parsed.code.trim() && Number(parsed.scannedAt) > 0) {
+          activeProgramCode = parsed.code.trim();
+          qrScannedAt = Number(parsed.scannedAt);
+          return { valid: true, code: activeProgramCode, scannedAt: qrScannedAt };
+        }
+      }
+    }
+  } catch (err) {}
+
+  activeProgramCode = '';
+  qrScannedAt = 0;
+  return { valid: false, code: '', scannedAt: 0 };
+}
+
+// 스크립트 로드 즉시 주소창 URL 변조 및 세션 초기화 수행
+const initialQrSession = initializeQrAccessSession();
 
 // ============================================================================
 // 기기 식별자 (localStorage + IndexedDB) 및 보조 지문(deviceFingerprint)
@@ -381,6 +476,120 @@ function getKstDateTimeParts(dateObj = new Date()) {
     year: y,
     regDate: `${y}-${pad(kst.getUTCMonth() + 1)}-${pad(kst.getUTCDate())}`,
     regTime: `${pad(kst.getUTCHours())}:${pad(kst.getUTCMinutes())}:${pad(kst.getUTCSeconds())}`,
+  };
+}
+
+/**
+ * 단일 시간 문자열(예: "14:00", "오후 2:30", "18시 30분")을 자정 기준 초(seconds)로 변환
+ */
+function parseSingleTimeToSeconds(token) {
+  const str = String(token || '').trim();
+  if (!str) return null;
+
+  let period = '';
+  let hour = NaN;
+  let minute = 0;
+
+  const colonMatch = str.match(/^(오전|오후)?\s*(\d{1,2})\s*:\s*(\d{2})$/);
+  if (colonMatch) {
+    period = colonMatch[1] || '';
+    hour = parseInt(colonMatch[2], 10);
+    minute = parseInt(colonMatch[3], 10);
+  } else {
+    const korMatch = str.match(/^(오전|오후)?\s*(\d{1,2})시(?:\s*(\d{1,2})분?)?$/);
+    if (!korMatch) return null;
+    period = korMatch[1] || '';
+    hour = parseInt(korMatch[2], 10);
+    minute = korMatch[3] ? parseInt(korMatch[3], 10) : 0;
+  }
+
+  if (isNaN(hour) || isNaN(minute) || minute < 0 || minute > 59) return null;
+
+  if (period === '오전') {
+    if (hour < 1 || hour > 12) return null;
+    hour = hour === 12 ? 0 : hour;
+  } else if (period === '오후') {
+    if (hour < 1 || hour > 12) return null;
+    hour = hour === 12 ? 12 : hour + 12;
+  } else {
+    if (hour < 0 || hour > 24 || (hour === 24 && minute > 0)) return null;
+  }
+
+  return hour * 3600 + minute * 60;
+}
+
+/**
+ * 프로그램 시간 문자열(예: "14:00 ~ 16:00", "18:00-20:00", "오후 2:00 ~ 오후 4:00") 파싱
+ */
+function parseProgramTimeRange(timeStr) {
+  const raw = String(timeStr || '').trim();
+  if (!raw) return null;
+
+  const parts = raw.split(/\s*(?:~|-|–|—)\s*/);
+  if (parts.length !== 2) return null;
+
+  const startSec = parseSingleTimeToSeconds(parts[0]);
+  const endSec = parseSingleTimeToSeconds(parts[1]);
+  if (startSec === null || endSec === null || endSec < startSec) return null;
+
+  return { startSec, endSec };
+}
+
+function parseHmsToSeconds(hmsStr) {
+  const match = String(hmsStr || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  const hh = parseInt(match[1], 10);
+  const mm = parseInt(match[2], 10);
+  const ss = match[3] ? parseInt(match[3], 10) : 0;
+  return hh * 3600 + mm * 60 + ss;
+}
+
+/**
+ * 출석 등록 가능 시간 검증 및 지각 자동 판정
+ * - 등록 가능 시간: [수업 시작 30분 전] ~ [수업 종료 10분 후]
+ *   - 수업 시작 30분 전 이전 => "수업 시작 전입니다." (차단)
+ *   - 수업 종료 10분 후 이후 => "수업이 종료되었습니다." (차단)
+ * - 출석 상태(attendanceStatus):
+ *   - [수업 시작 시간 + 30분] 이상 (예: 18:00 수업일 때 18:30:00부터) => "지각"
+ *   - 그 이전(정상 출석) => "" (빈칸)
+ */
+function evaluateClassAttendanceTime(programTimeStr, referenceHms) {
+  const range = parseProgramTimeRange(programTimeStr);
+  if (!range) {
+    return { allowed: true, attendanceStatus: '' };
+  }
+
+  const hms = referenceHms || getKstDateTimeParts().regTime;
+  const nowSec = parseHmsToSeconds(hms);
+  if (nowSec === null) {
+    return { allowed: true, attendanceStatus: '' };
+  }
+
+  const openSec = range.startSec - 30 * 60;
+  const lateSec = range.startSec + 30 * 60;
+  const closeSec = range.endSec + 10 * 60;
+
+  if (nowSec < openSec) {
+    return {
+      allowed: false,
+      status: 'before_class',
+      message: ERROR_MSG_BEFORE_CLASS,
+      attendanceStatus: '',
+    };
+  }
+
+  if (nowSec > closeSec) {
+    return {
+      allowed: false,
+      status: 'after_class',
+      message: ERROR_MSG_AFTER_CLASS,
+      attendanceStatus: '',
+    };
+  }
+
+  return {
+    allowed: true,
+    attendanceStatus: nowSec >= lateSec ? '지각' : '',
   };
 }
 
@@ -757,6 +966,16 @@ async function submitAttendanceRecord(payload) {
       };
     }
 
+    // 1-2) 출석 등록 가능 시간 검증 ([수업 시작 30분 전] ~ [수업 종료 10분 후]) 및 지각 자동 판정
+    const kst = getKstDateTimeParts();
+    const timeEval = evaluateClassAttendanceTime(program.time, kst.regTime);
+    if (!isManual && !timeEval.allowed) {
+      return {
+        status: timeEval.status,
+        message: timeEval.message,
+      };
+    }
+
     // 2) 위치 기반 출석 제한 검증 (수동 출석 승인 시 우회)
     if (program.locationEnabled && !isManual) {
       const targetLat = Number(program.latitude);
@@ -836,9 +1055,9 @@ async function submitAttendanceRecord(payload) {
       };
     }
 
-    const kst = getKstDateTimeParts();
     const ageGroup = calculateAgeGroup(payload.birthDate, kst.year);
     const note = isManual ? MANUAL_CONFIRM_NOTE : '';
+    const attendanceStatus = timeEval.attendanceStatus;
 
     const record = {
       regDate: kst.regDate,
@@ -854,6 +1073,7 @@ async function submitAttendanceRecord(payload) {
       deviceId: payload.deviceId,
       deviceFingerprint: payload.deviceFingerprint,
       note,
+      attendanceStatus,
     };
 
     participants.push(record);
@@ -1069,9 +1289,9 @@ document.addEventListener('DOMContentLoaded', () => {
     programSchedule.textContent = `${program.date} · ${program.time}`;
     programInstructor.textContent = `강사: ${program.instructor}`;
 
-    if (program.locationEnabled) {
-      const placePrefix = program.locationName ? `${program.locationName} ` : '';
-      programLocationInfo.textContent = `장소: ${placePrefix}(반경 ${program.allowedRadius}m 이내)`;
+    // 장소명만 표시 (허용 반경 거리 텍스트/배지 비노출)
+    if (program.locationName) {
+      programLocationInfo.textContent = `장소: ${program.locationName}`;
       programLocationDivider.classList.remove('hidden');
       programLocationInfo.classList.remove('hidden');
     } else {
@@ -1321,16 +1541,13 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // --------------------------------------------------------------------------
-  // 7. 초기 진입: 기기 식별자 생성 -> 프로그램 조회 -> 일자/다회차 검증 -> 기출석 확인
+  // 7. 초기 진입: QR 세션 확인 -> 기기 식별자 생성 -> 프로그램 조회 -> 일자/다회차 검증 -> 기출석 확인
   // --------------------------------------------------------------------------
   async function initPage() {
-    const params = new URLSearchParams(window.location.search);
-    const code = (params.get('code') || '').trim();
+    const code = activeProgramCode;
 
     if (!code) {
-      showInvalidScreen(
-        '유효하지 않은 프로그램 접근입니다. 현장에 비치된 QR코드를 다시 스캔해주세요.'
-      );
+      showInvalidScreen(ERROR_MSG_INVALID_QR_ACCESS);
       return;
     }
 
@@ -1353,9 +1570,8 @@ document.addEventListener('DOMContentLoaded', () => {
       });
 
       if (!program) {
-        showInvalidScreen(
-          '유효하지 않은 프로그램 접근입니다. 현장에 비치된 QR코드를 다시 스캔해주세요.'
-        );
+        clearQrAccessSession();
+        showInvalidScreen(ERROR_MSG_INVALID_QR_ACCESS);
         return;
       }
 
@@ -1392,11 +1608,28 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --------------------------------------------------------------------------
-  // 8. 본인 출석 등록 제출 처리 (GPS 반경 검증 포함)
+  // 8. 본인 출석 등록 제출 처리 (QR 3분 만료 + 수업 시간 검증 + GPS 반경 검증)
   // --------------------------------------------------------------------------
   attendanceForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!currentProgram) return;
+
+    const isManualApproved = Boolean(approvedManualCode);
+
+    // 0) QR 스캔 후 3분 인증 만료 검증 (수동 출석 승인 모드 제외)
+    if (!isManualApproved && (!qrScannedAt || Date.now() - qrScannedAt >= QR_SESSION_TTL_MS)) {
+      showFormAlert(ERROR_MSG_SESSION_EXPIRED);
+      return;
+    }
+
+    // 1) 출석 등록 가능 시간 검증: [수업 시작 30분 전] ~ [수업 종료 10분 후] (수동 출석 승인 모드 제외)
+    if (!isManualApproved) {
+      const timeCheck = evaluateClassAttendanceTime(currentProgram.time);
+      if (!timeCheck.allowed) {
+        showFormAlert(timeCheck.message);
+        return;
+      }
+    }
 
     const formCheck = validateAttendanceFormInputs({ focusInvalid: true });
     if (!formCheck.valid) return;
@@ -1422,7 +1655,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
-    const isManualApproved = Boolean(approvedManualCode);
     let userLat = null;
     let userLng = null;
 

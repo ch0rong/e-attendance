@@ -4,7 +4,7 @@
  *
  * [시트 구성]
  * 1. 프로그램목록: 생성일시 | 프로그램코드 | 프로그램명 | 프로그램일자 | 프로그램시간 | 강사명 | 출석부명단 | 다회차여부 | 위치제한여부 | 장소명 | 위도 | 경도 | 허용반경 | 담당자확인코드
- * 2. 참가자명단:   등록날짜 | 등록시간 | 프로그램코드 | 프로그램명 | 출석일자 | 참가자명 | 생년월일 | 연령구분 | 성별 | 개인정보동의 | 기기ID | 비고
+ * 2. 참가자명단:   등록날짜 | 등록시간 | 프로그램코드 | 프로그램명 | 출석일자 | 참가자명 | 생년월일 | 연령구분 | 성별 | 개인정보동의 | 기기ID | 비고 | 출석상태
  */
 
 const SHEET_PROGRAMS = '프로그램목록';
@@ -40,6 +40,7 @@ const PARTICIPANT_HEADERS = [
   '개인정보동의',
   '기기ID',
   '비고',
+  '출석상태',
 ];
 
 const TIMEZONE = 'Asia/Seoul';
@@ -51,6 +52,8 @@ const ERROR_MSG_DEVICE_DUPLICATE = '이미 이 기기에서 출석 등록이 완
 const ERROR_MSG_PARTICIPANT_DUPLICATE = '이미 출석 처리가 완료된 참가자입니다.';
 const ERROR_MSG_GPS_FAILED = '위치 정보를 확인할 수 없습니다. 스마트폰의 위치(GPS) 권한을 허용해주세요.';
 const ERROR_MSG_INVALID_MANAGER_CODE = '담당자 확인 코드가 일치하지 않습니다.';
+const ERROR_MSG_BEFORE_CLASS = '수업 시작 전입니다.';
+const ERROR_MSG_AFTER_CLASS = '수업이 종료되었습니다.';
 const MANUAL_CONFIRM_NOTE = '담당자 수동확인';
 
 /**
@@ -802,6 +805,119 @@ function calculateAgeGroup(birthDateStr, currentYear) {
 }
 
 /**
+ * 단일 시간 문자열(예: "14:00", "오후 2:30", "18시 30분")을 자정 기준 초로 변환
+ */
+function parseSingleTimeToSeconds(token) {
+  var str = String(token || '').trim();
+  if (!str) return null;
+
+  var period = '';
+  var hour = NaN;
+  var minute = 0;
+
+  var colonMatch = str.match(/^(오전|오후)?\s*(\d{1,2})\s*:\s*(\d{2})$/);
+  if (colonMatch) {
+    period = colonMatch[1] || '';
+    hour = parseInt(colonMatch[2], 10);
+    minute = parseInt(colonMatch[3], 10);
+  } else {
+    var korMatch = str.match(/^(오전|오후)?\s*(\d{1,2})시(?:\s*(\d{1,2})분?)?$/);
+    if (!korMatch) return null;
+    period = korMatch[1] || '';
+    hour = parseInt(korMatch[2], 10);
+    minute = korMatch[3] ? parseInt(korMatch[3], 10) : 0;
+  }
+
+  if (isNaN(hour) || isNaN(minute) || minute < 0 || minute > 59) return null;
+
+  if (period === '오전') {
+    if (hour < 1 || hour > 12) return null;
+    hour = hour === 12 ? 0 : hour;
+  } else if (period === '오후') {
+    if (hour < 1 || hour > 12) return null;
+    hour = hour === 12 ? 12 : hour + 12;
+  } else {
+    if (hour < 0 || hour > 24 || (hour === 24 && minute > 0)) return null;
+  }
+
+  return hour * 3600 + minute * 60;
+}
+
+/**
+ * 프로그램 시간 문자열(예: "14:00 ~ 16:00", "18:00-20:00") 파싱
+ */
+function parseProgramTimeRange(timeStr) {
+  var raw = String(timeStr || '').trim();
+  if (!raw) return null;
+
+  var parts = raw.split(/\s*(?:~|-|–|—)\s*/);
+  if (parts.length !== 2) return null;
+
+  var startSec = parseSingleTimeToSeconds(parts[0]);
+  var endSec = parseSingleTimeToSeconds(parts[1]);
+  if (startSec === null || endSec === null || endSec < startSec) return null;
+
+  return { startSec: startSec, endSec: endSec };
+}
+
+function parseHmsToSeconds(hmsStr) {
+  var match = String(hmsStr || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  var hh = parseInt(match[1], 10);
+  var mm = parseInt(match[2], 10);
+  var ss = match[3] ? parseInt(match[3], 10) : 0;
+  return hh * 3600 + mm * 60 + ss;
+}
+
+/**
+ * 출석 등록 가능 시간 검증 및 지각 자동 판정
+ * - 등록 가능 시간: [수업 시작 30분 전] ~ [수업 종료 10분 후]
+ *   - 수업 시작 30분 전 이전 => "수업 시작 전입니다."
+ *   - 수업 종료 10분 후 이후 => "수업이 종료되었습니다."
+ * - 지각 판정:
+ *   - [수업 시작 시간 + 30분] 이상 (예: 18:00 수업일 때 18:30:00부터) => "지각"
+ *   - 그 이전 정상 출석 => "" (빈칸)
+ */
+function evaluateClassAttendanceTime(programTimeStr, regTimeHms) {
+  var range = parseProgramTimeRange(programTimeStr);
+  if (!range) {
+    return { allowed: true, attendanceStatus: '' };
+  }
+
+  var nowSec = parseHmsToSeconds(regTimeHms);
+  if (nowSec === null) {
+    return { allowed: true, attendanceStatus: '' };
+  }
+
+  var openSec = range.startSec - 30 * 60;
+  var lateSec = range.startSec + 30 * 60;
+  var closeSec = range.endSec + 10 * 60;
+
+  if (nowSec < openSec) {
+    return {
+      allowed: false,
+      status: 'before_class',
+      message: ERROR_MSG_BEFORE_CLASS,
+      attendanceStatus: '',
+    };
+  }
+
+  if (nowSec > closeSec) {
+    return {
+      allowed: false,
+      status: 'after_class',
+      message: ERROR_MSG_AFTER_CLASS,
+      attendanceStatus: '',
+    };
+  }
+
+  return {
+    allowed: true,
+    attendanceStatus: nowSec >= lateSec ? '지각' : '',
+  };
+}
+
+/**
  * POST: 참가자 본인 출석 등록 (일반 GPS 출석 + 담당자 수동 출석 승인)
  */
 function handleRegisterParticipant(payload) {
@@ -862,6 +978,15 @@ function handleRegisterParticipant(payload) {
     return createJsonResponse({
       status: 'invalid_date',
       message: '출석 가능한 일자가 아닙니다. (프로그램 일자: ' + program.date + ')',
+    });
+  }
+
+  // 4-2. 출석 등록 가능 시간 검증 ([수업 시작 30분 전] ~ [수업 종료 10분 후]) 및 지각 자동 판정
+  const timeEval = evaluateClassAttendanceTime(program.time, regTime);
+  if (!manualOverride && !timeEval.allowed) {
+    return createJsonResponse({
+      status: timeEval.status,
+      message: timeEval.message,
     });
   }
 
@@ -956,6 +1081,7 @@ function handleRegisterParticipant(payload) {
   const ageGroup = calculateAgeGroup(birthDate, currentYear);
   const deviceCellValue = formatDeviceCell(deviceId, deviceFingerprint);
   const note = manualOverride ? MANUAL_CONFIRM_NOTE : '';
+  const attendanceStatus = timeEval.attendanceStatus;
 
   const newRow = [
     regDate,
@@ -970,6 +1096,7 @@ function handleRegisterParticipant(payload) {
     privacyConsent,
     deviceCellValue,
     note,
+    attendanceStatus,
   ];
 
   const nextRow = sheet.getLastRow() + 1;
@@ -993,6 +1120,7 @@ function handleRegisterParticipant(payload) {
       privacyConsent: privacyConsent,
       deviceId: deviceId,
       note: note,
+      attendanceStatus: attendanceStatus,
     },
   });
 }
