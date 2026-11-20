@@ -426,12 +426,21 @@ function parseBoolFlag(val) {
 
 const WEEKDAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
 
+function normalizeIsoDateToken(token) {
+  const s = String(token || '').trim();
+  const m = s.match(/^(\d{4})[-/.]\s*(\d{1,2})[-/.]\s*(\d{1,2})\.?$/);
+  if (m) {
+    return `${m[1]}-${String(Number(m[2])).padStart(2, '0')}-${String(Number(m[3])).padStart(2, '0')}`;
+  }
+  return s;
+}
+
 function parseProgramDates(raw) {
   let items = [];
   if (Array.isArray(raw)) {
-    items = raw.map((v) => String(v || '').trim());
+    items = raw.map((v) => normalizeIsoDateToken(v));
   } else if (typeof raw === 'string' && raw.trim() !== '') {
-    items = raw.split(/[,\r\n]+/).map((v) => v.trim());
+    items = raw.split(/[,\r\n]+/).map((v) => normalizeIsoDateToken(v));
   }
   const unique = Array.from(new Set(items.filter((v) => v.length > 0)));
   unique.sort();

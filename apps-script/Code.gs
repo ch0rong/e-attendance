@@ -239,15 +239,28 @@ function toSheetFlag(val) {
   return parseBoolFlag(val) ? 'Y' : 'N';
 }
 
+function normalizeIsoDateToken(token) {
+  var s = String(token || '').trim();
+  var m = s.match(/^(\d{4})[-/.]\s*(\d{1,2})[-/.]\s*(\d{1,2})\.?$/);
+  if (m) {
+    var mm = String(Number(m[2]));
+    var dd = String(Number(m[3]));
+    if (mm.length < 2) mm = '0' + mm;
+    if (dd.length < 2) dd = '0' + dd;
+    return m[1] + '-' + mm + '-' + dd;
+  }
+  return s;
+}
+
 /**
- * 프로그램 일자 파싱 (단일/복수 날짜 지원: 중복 제거 + 오름차순 정렬)
+ * 프로그램 일자 파싱 (단일/복수 날짜 지원 + 시트 날짜 서식 보정 + 중복 제거 + 오름차순 정렬)
  */
 function parseProgramDates(raw) {
   var items = [];
   if (Array.isArray(raw)) {
-    items = raw.map(function (item) { return String(item || '').trim(); });
+    items = raw.map(function (item) { return normalizeIsoDateToken(item); });
   } else if (typeof raw === 'string' && raw.trim() !== '') {
-    items = raw.split(/[,\r\n]+/).map(function (item) { return item.trim(); });
+    items = raw.split(/[,\r\n]+/).map(function (item) { return normalizeIsoDateToken(item); });
   }
   var seen = {};
   var result = [];
@@ -519,6 +532,7 @@ function handleGetProgram(code, deviceId, deviceFingerprint, attendanceDate) {
       code: program.code,
       name: program.name,
       date: program.date,
+      dates: parseProgramDates(program.date),
       time: program.time,
       instructor: program.instructor,
       rosterCount: program.roster.length,
