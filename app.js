@@ -424,6 +424,8 @@ function parseBoolFlag(val) {
   return s === 'Y' || s === 'TRUE' || s === '1' || s === 'YES';
 }
 
+const WEEKDAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+
 function parseProgramDates(raw) {
   let items = [];
   if (Array.isArray(raw)) {
@@ -434,6 +436,19 @@ function parseProgramDates(raw) {
   const unique = Array.from(new Set(items.filter((v) => v.length > 0)));
   unique.sort();
   return unique;
+}
+
+/**
+ * YYYY-MM-DD -> 간소화 날짜 표기 (예: 2026-11-06 -> 11/6(금))
+ */
+function formatCompactDateLabel(dateStr) {
+  const match = String(dateStr || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return String(dateStr || '').trim();
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const weekday = WEEKDAY_LABELS[new Date(year, month - 1, day).getDay()];
+  return `${month}/${day}(${weekday})`;
 }
 
 /**
@@ -1150,6 +1165,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const programInstructor = document.getElementById('programInstructor');
   const programLocationDivider = document.getElementById('programLocationDivider');
   const programLocationInfo = document.getElementById('programLocationInfo');
+  const programDatesList = document.getElementById('programDatesList');
   const attendanceDateInput = document.getElementById('attendanceDate');
   const participantNameInput = document.getElementById('participantName');
   const birthDateInput = document.getElementById('birthDateInput');
@@ -1301,8 +1317,31 @@ document.addEventListener('DOMContentLoaded', () => {
     currentAttendanceDate = attendanceDate;
 
     programNameInput.value = program.name;
-    programSchedule.textContent = `${program.date} · ${program.time}`;
+    programSchedule.textContent = program.time || '';
     programInstructor.textContent = `강사: ${program.instructor}`;
+
+    // 날짜를 11/6(금) 11/13(금) 형태의 간소화 타원형 배지로 표시
+    const dates = parseProgramDates(
+      Array.isArray(program.dates) && program.dates.length > 0 ? program.dates : program.date
+    );
+    const todayIso = getSystemLocalIsoDate();
+    if (programDatesList) {
+      programDatesList.innerHTML = '';
+      if (dates.length > 0) {
+        dates.forEach((d) => {
+          const pill = document.createElement('span');
+          pill.className = 'session-date-pill';
+          if (d === todayIso) {
+            pill.classList.add('is-today');
+          }
+          pill.textContent = formatCompactDateLabel(d);
+          programDatesList.appendChild(pill);
+        });
+        programDatesList.classList.remove('hidden');
+      } else {
+        programDatesList.classList.add('hidden');
+      }
+    }
 
     // 장소명만 표시 (허용 반경 거리 텍스트/배지 비노출)
     if (program.locationName) {

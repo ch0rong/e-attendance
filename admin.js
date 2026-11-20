@@ -222,6 +222,127 @@ function normalizeProgramObject(p) {
 }
 
 /**
+ * 두벌식 영문 타자 -> 한글 실시간 자동 조합 변환기
+ * - 비밀번호/숫자 입력 후 OS 한영 상태가 영문으로 남아있어도 이름칸 입력 시 즉시 한글로 조합
+ */
+const ENG_TO_JAMO = {
+  r: 'ㄱ', R: 'ㄲ', s: 'ㄴ', e: 'ㄷ', E: 'ㄸ', f: 'ㄹ', a: 'ㅁ',
+  q: 'ㅂ', Q: 'ㅃ', t: 'ㅅ', T: 'ㅆ', d: 'ㅇ', w: 'ㅈ', W: 'ㅉ',
+  c: 'ㅊ', z: 'ㅋ', x: 'ㅌ', v: 'ㅍ', g: 'ㅎ',
+  k: 'ㅏ', o: 'ㅐ', i: 'ㅑ', O: 'ㅒ', j: 'ㅓ', p: 'ㅔ', u: 'ㅕ',
+  P: 'ㅖ', h: 'ㅗ', y: 'ㅛ', n: 'ㅜ', b: 'ㅠ', m: 'ㅡ', l: 'ㅣ',
+};
+const CHOSEONG_LIST = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const JUNGSEONG_LIST = ['ㅏ','ㅐ','ㅑ','ㅒ','ㅓ','ㅔ','ㅕ','ㅖ','ㅗ','ㅘ','ㅙ','ㅚ','ㅛ','ㅜ','ㅝ','ㅞ','ㅟ','ㅠ','ㅡ','ㅢ','ㅣ'];
+const JONGSEONG_LIST = ['','ㄱ','ㄲ','ㄳ','ㄴ','ㄵ','ㄶ','ㄷ','ㄹ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅁ','ㅂ','ㅄ','ㅅ','ㅆ','ㅇ','ㅈ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const COMPLEX_VOWEL_MAP = { 'ㅗㅏ':'ㅘ','ㅗㅐ':'ㅙ','ㅗㅣ':'ㅚ','ㅜㅓ':'ㅝ','ㅜㅔ':'ㅞ','ㅜㅣ':'ㅟ','ㅡㅣ':'ㅢ' };
+const SPLIT_VOWEL_MAP = { 'ㅘ':['ㅗ','ㅏ'],'ㅙ':['ㅗ','ㅐ'],'ㅚ':['ㅗ','ㅣ'],'ㅝ':['ㅜ','ㅓ'],'ㅞ':['ㅜ','ㅔ'],'ㅟ':['ㅜ','ㅣ'],'ㅢ':['ㅡ','ㅣ'] };
+const COMPLEX_JONG_MAP = { 'ㄱㅅ':'ㄳ','ㄴㅈ':'ㄵ','ㄴㅎ':'ㄶ','ㄹㄱ':'ㄺ','ㄹㅁ':'ㄻ','ㄹㅂ':'ㄼ','ㄹㅅ':'ㄽ','ㄹㅌ':'ㄾ','ㄹㅍ':'ㄿ','ㄹㅎ':'ㅀ','ㅂㅅ':'ㅄ' };
+const SPLIT_JONG_MAP = { 'ㄳ':['ㄱ','ㅅ'],'ㄵ':['ㄴ','ㅈ'],'ㄶ':['ㄴ','ㅎ'],'ㄺ':['ㄹ','ㄱ'],'ㄻ':['ㄹ','ㅁ'],'ㄼ':['ㄹ','ㅂ'],'ㄽ':['ㄹ','ㅅ'],'ㄾ':['ㄹ','ㅌ'],'ㄿ':['ㄹ','ㅍ'],'ㅀ':['ㄹ','ㅎ'],'ㅄ':['ㅂ','ㅅ'] };
+const CHOSEONG_SET = new Set(CHOSEONG_LIST);
+const JUNGSEONG_SET = new Set(JUNGSEONG_LIST);
+
+function isVowelJamo(ch) {
+  return JUNGSEONG_SET.has(ch);
+}
+
+function isConsonantJamo(ch) {
+  return CHOSEONG_SET.has(ch);
+}
+
+function decomposeToJamoStream(text) {
+  const stream = [];
+  for (const ch of String(text || '')) {
+    const code = ch.charCodeAt(0);
+    if (code >= 0xac00 && code <= 0xd7a3) {
+      const offset = code - 0xac00;
+      const cho = Math.floor(offset / 588);
+      const jung = Math.floor((offset % 588) / 28);
+      const jong = offset % 28;
+      stream.push(CHOSEONG_LIST[cho]);
+      const v = JUNGSEONG_LIST[jung];
+      if (SPLIT_VOWEL_MAP[v]) stream.push(...SPLIT_VOWEL_MAP[v]);
+      else stream.push(v);
+      if (jong > 0) {
+        const j = JONGSEONG_LIST[jong];
+        if (SPLIT_JONG_MAP[j]) stream.push(...SPLIT_JONG_MAP[j]);
+        else stream.push(j);
+      }
+    } else if (ENG_TO_JAMO[ch]) {
+      stream.push(ENG_TO_JAMO[ch]);
+    } else if (ENG_TO_JAMO[ch.toLowerCase()]) {
+      stream.push(ENG_TO_JAMO[ch.toLowerCase()]);
+    } else if (SPLIT_VOWEL_MAP[ch]) {
+      stream.push(...SPLIT_VOWEL_MAP[ch]);
+    } else if (SPLIT_JONG_MAP[ch]) {
+      stream.push(...SPLIT_JONG_MAP[ch]);
+    } else {
+      stream.push(ch);
+    }
+  }
+  return stream;
+}
+
+function convertEngTypingToHangul(text) {
+  const stream = decomposeToJamoStream(text);
+  let out = '';
+  let i = 0;
+
+  while (i < stream.length) {
+    const c = stream[i];
+    if (isConsonantJamo(c) && i + 1 < stream.length && isVowelJamo(stream[i + 1])) {
+      const choIdx = CHOSEONG_LIST.indexOf(c);
+      i += 1;
+
+      // 중성 (복합 모음 결합 확인)
+      let vowel = stream[i];
+      i += 1;
+      if (i < stream.length && COMPLEX_VOWEL_MAP[vowel + stream[i]]) {
+        vowel = COMPLEX_VOWEL_MAP[vowel + stream[i]];
+        i += 1;
+      }
+      const jungIdx = JUNGSEONG_LIST.indexOf(vowel);
+
+      // 종성 (다음 글자가 모음이면 초성으로 넘김)
+      let jongIdx = 0;
+      if (i < stream.length && isConsonantJamo(stream[i])) {
+        const cand1 = stream[i];
+        const next1IsVowel = i + 1 < stream.length && isVowelJamo(stream[i + 1]);
+        const j1Idx = JONGSEONG_LIST.indexOf(cand1);
+
+        if (!next1IsVowel && j1Idx > 0) {
+          // 겹받침 가능 여부 확인 (그 다음 글자가 모음이면 두 번째 자음은 다음 초성으로)
+          if (i + 1 < stream.length && isConsonantJamo(stream[i + 1])) {
+            const combined = COMPLEX_JONG_MAP[cand1 + stream[i + 1]];
+            const next2IsVowel = i + 2 < stream.length && isVowelJamo(stream[i + 2]);
+            if (combined && !next2IsVowel) {
+              jongIdx = JONGSEONG_LIST.indexOf(combined);
+              i += 2;
+            } else {
+              jongIdx = j1Idx;
+              i += 1;
+            }
+          } else {
+            jongIdx = j1Idx;
+            i += 1;
+          }
+        }
+      }
+
+      out += String.fromCharCode(0xac00 + choIdx * 588 + jungIdx * 28 + jongIdx);
+    } else if (isVowelJamo(c) && i + 1 < stream.length && COMPLEX_VOWEL_MAP[c + stream[i + 1]]) {
+      out += COMPLEX_VOWEL_MAP[c + stream[i + 1]];
+      i += 2;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+
+  return out;
+}
+
+/**
  * 이름 검증 (공백 제거 후 한글 완성형 2~5자, 3회 연속 반복 금지, 블랙리스트 차단)
  */
 function validateKoreanName(rawName) {
@@ -981,16 +1102,30 @@ document.addEventListener('DOMContentLoaded', () => {
     row.className = 'roster-row';
     row.dataset.gender = '';
 
-    // ① 이름 입력칸
+    // ① 이름 입력칸 (한글 최우선 입력 + 영타 자동 한글 조합)
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
     nameInput.className = 'form-input roster-name-input';
     nameInput.placeholder = '이름';
     nameInput.maxLength = 10;
+    nameInput.setAttribute('lang', 'ko');
+    nameInput.setAttribute('inputmode', 'text');
+    nameInput.setAttribute('autocomplete', 'off');
+    nameInput.setAttribute('autocapitalize', 'off');
+    nameInput.setAttribute('autocorrect', 'off');
+    nameInput.setAttribute('spellcheck', 'false');
     nameInput.setAttribute('aria-label', '참가자 이름');
     if (initialData && initialData.name) {
       nameInput.value = initialData.name;
     }
+
+    let isComposingName = false;
+    nameInput.addEventListener('compositionstart', () => {
+      isComposingName = true;
+    });
+    nameInput.addEventListener('compositionend', () => {
+      isComposingName = false;
+    });
 
     // ② 생년월일 6자리 숫자 직접 입력칸
     const birthInput = document.createElement('input');
@@ -1067,7 +1202,13 @@ document.addEventListener('DOMContentLoaded', () => {
       hideCreateAlert();
     });
 
-    nameInput.addEventListener('input', () => {
+    nameInput.addEventListener('input', (e) => {
+      if (!isComposingName && !(e && e.isComposing) && /[a-zA-Z]/.test(nameInput.value)) {
+        const converted = convertEngTypingToHangul(nameInput.value);
+        if (converted !== nameInput.value) {
+          nameInput.value = converted;
+        }
+      }
       nameInput.classList.remove('is-invalid');
       updateRosterSummaryUI();
       hideCreateAlert();
